@@ -1,54 +1,34 @@
 import numpy as np
-import sounddevice as sd
-from audio_input import ORIGINAL_AUDIO_QUEUE
-from tts import TTS_AUDIO_QUEUE
+import soundfile as sf
 
-def mix_audio(original_chunk, tts_chunk, original_volume=0.3):
+RATE = 16000
+
+def mix_audio(input_audio: np.ndarray, tts_audio: np.ndarray) -> np.ndarray:
     """
-    Mixes two audio signals:
-    - original_chunk: raw PCM bytes (int16) from the original audio.
-    - tts_chunk: a numpy array (float32) from the TTS engine.
-    Returns a mixed numpy array (float32) normalized between -1 and 1.
+    Mixes the input (denoised) audio with the synthesized TTS audio.
+    - If both channels are available, mix using 30% input and 70% TTS.
+    - If one channel is empty, return the nonempty one.
+    - If both are empty, return an empty array.
+    The mixed length is the minimum length of the two non-empty inputs.
     """
-    # Convert original audio bytes to numpy float32 array
-    original_np = np.frombuffer(original_chunk, dtype=np.int16).astype(np.float32) / 32768.0
-    len_original = len(original_np)
-    len_tts = len(tts_chunk)
-    mixed_len = max(len_original, len_tts)
-    mixed = np.zeros(mixed_len, dtype=np.float32)
+    # Ensure inputs are numpy arrays with float32 dtype.
+    input_audio = np.asarray(input_audio, dtype=np.float32)
+    tts_audio = np.asarray(tts_audio, dtype=np.float32)
     
-    if len_original > 0:
-        mixed[:len_original] += original_np * original_volume
-    if len_tts > 0:
-        mixed[:len_tts] += tts_chunk
-    return np.clip(mixed, -1.0, 1.0)
+    # Check for empty inputs
+    if input_audio.size == 0 and tts_audio.size == 0:
+        return np.array([], dtype=np.float32)
+    elif input_audio.size == 0:
+        return tts_audio  # Return TTS audio if input is empty.
+    elif tts_audio.size == 0:
+        return input_audio  # Return input audio if TTS is empty.
+    else:
+        min_len = min(len(input_audio), len(tts_audio))
+        mixed = input_audio[:min_len] * 0.3 + tts_audio[:min_len] * 0.7
+        return np.clip(mixed, -1.0, 1.0)
 
-def mixer_loop():
+def save_mixed_audio(mixed_audio: np.ndarray, filename: str):
     """
-    Waits for TTS audio and then gathers a corresponding segment of original audio.
-    Mixes them and plays the result.
+    Save the mixed audio to a WAV file.
     """
-    while True:
-        tts_audio = TTS_AUDIO_QUEUE.get()
-        if tts_audio is None:
-            break
-        original_chunks = []
-        # Estimate the number of samples needed from the original audio to match TTS length.
-        tts_length = len(tts_audio)
-        collected = 0
-        while collected < tts_length:
-            original_chunk = ORIGINAL_AUDIO_QUEUE.get()
-            if original_chunk is None:
-                break
-            original_chunks.append(original_chunk)
-            # int16: 2 bytes per sample
-            collected += len(original_chunk) // 2
-        if original_chunks:
-            original_data = b"".join(original_chunks)
-            mixed = mix_audio(original_data, tts_audio)
-            # Assumed playback sample rate (adjust if needed)
-            sd.play(mixed, samplerate=22050)
-            sd.wait()
-        else:
-            sd.play(tts_audio, samplerate=22050)
-            sd.wait()
+    sf.write(filename, mixed_audio, RATE)

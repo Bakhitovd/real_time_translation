@@ -1,29 +1,19 @@
-import queue
-from TTS.api import TTS
-from translation import TTS_QUEUE
+import numpy as np
+from kokoro import KPipeline
 
-# Queue for passing synthesized TTS audio (numpy arrays) to the mixer
-TTS_AUDIO_QUEUE = queue.Queue()
+# Initialize the Kokoro pipeline.
+# Adjust lang_code and voice as needed (here 'a' indicates American English).
+pipeline = KPipeline(lang_code='a')
 
-# Initialize TTS model (adjust model as desired)
-tts_model = TTS(model_name="tts_models/en/ljspeech/tacotron2-DDC", gpu=True)
-
-def synthesize_speech(english_text):
+def synthesize_tts(english_text: str) -> np.ndarray:
     """
-    Converts English text to a waveform (numpy array).
+    Synthesize English speech from text using the Kokoro TTS pipeline.
+    The pipeline returns a generator yielding (graphemes, phonemes, audio).
+    We'll take the first audio chunk produced.
     """
-    wav = tts_model.tts(english_text)
-    return wav
-
-def tts_loop():
-    """
-    Reads translated English text from TTS_QUEUE, synthesizes speech,
-    and sends the audio waveform to TTS_AUDIO_QUEUE.
-    """
-    while True:
-        english_text = TTS_QUEUE.get()
-        if english_text is None:
-            break
-        print("Synthesizing speech for:", english_text)
-        audio_wav = synthesize_speech(english_text)
-        TTS_AUDIO_QUEUE.put(audio_wav)
+    generator = pipeline(english_text, voice='af_heart', speed=1, split_pattern=r'\n+')
+    try:
+        gs, ps, audio = next(generator)
+    except StopIteration:
+        audio = np.array([])
+    return audio

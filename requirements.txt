@@ -1,8 +1,7 @@
-faster-whisper
-openai
-pyaudio
-sounddevice
 numpy
+faster-whisper
 torch
-TTS
-python-dotenv
+noisereduce
+soundfile
+openai
+kokoro>=0.3.4

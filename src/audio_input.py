@@ -1,56 +1,42 @@
-import pyaudio
-import wave
-import threading
-import queue
+import socket
+import numpy as np
 
-# Global queues for audio data
-AUDIO_QUEUE = queue.Queue()           # For ASR processing
-ORIGINAL_AUDIO_QUEUE = queue.Queue()    # For playback mixing
+# === Audio Configuration ===
+RATE = 16000            # Sampling rate (Hz)
+CHUNK = 1024            # Number of bytes per socket recv
+BUFFER_DURATION = 3     # seconds per segment
+BYTES_PER_SAMPLE = 2    # 16-bit audio
+BUFFER_SIZE = RATE * BUFFER_DURATION * BYTES_PER_SAMPLE
 
-CHUNK_SIZE = 1024     # Frames per chunk
-RATE = 16000          # Sampling rate (Hz)
-CHANNELS = 1          # Mono audio
+# TCP server settings
+HOST = ''      # Listen on all interfaces
+PORT = 50007   # TCP port
 
-def start_mic_stream():
+def audio_server():
     """
-    Captures audio from the USB microphone and pushes data into both AUDIO_QUEUE and ORIGINAL_AUDIO_QUEUE.
+    Starts a TCP server that yields audio segments (as numpy arrays) when enough data is received.
     """
-    p = pyaudio.PyAudio()
-    stream = p.open(format=pyaudio.paInt16,
-                    channels=CHANNELS,
-                    rate=RATE,
-                    input=True,
-                    frames_per_buffer=CHUNK_SIZE)
-    
-    def read_mic():
-        print("Starting USB microphone stream...")
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind((HOST, PORT))
+    s.listen(1)
+    print(f"Audio server listening on port {PORT}...")
+    conn, addr = s.accept()
+    print("Connected by", addr)
+    audio_buffer = bytearray()
+    try:
         while True:
-            data = stream.read(CHUNK_SIZE)
-            AUDIO_QUEUE.put(data)
-            ORIGINAL_AUDIO_QUEUE.put(data)
-    
-    thread = threading.Thread(target=read_mic, daemon=True)
-    thread.start()
-    return AUDIO_QUEUE
-
-def stream_from_file(file_path):
-    """
-    Streams audio from a WAV file, simulating live input.
-    """
-    wf = wave.open(file_path, 'rb')
-    
-    def read_file():
-        print("Streaming audio from file:", file_path)
-        while True:
-            data = wf.readframes(CHUNK_SIZE)
+            data = conn.recv(CHUNK)
             if not data:
                 break
-            AUDIO_QUEUE.put(data)
-            ORIGINAL_AUDIO_QUEUE.put(data)
-        wf.close()
-        AUDIO_QUEUE.put(None)          # Signal end of stream
-        ORIGINAL_AUDIO_QUEUE.put(None)
-    
-    thread = threading.Thread(target=read_file, daemon=True)
-    thread.start()
-    return AUDIO_QUEUE
+            audio_buffer.extend(data)
+            if len(audio_buffer) >= BUFFER_SIZE:
+                segment = audio_buffer[:BUFFER_SIZE]
+                audio_buffer = audio_buffer[BUFFER_SIZE:]
+                # Convert raw PCM bytes to a normalized numpy array (float32 in [-1, 1])
+                audio_np = np.frombuffer(segment, dtype=np.int16).astype(np.float32) / 32768.0
+                yield audio_np
+    except KeyboardInterrupt:
+        print("Audio server interrupted. Shutting down...")
+    finally:
+        conn.close()
+        s.close()

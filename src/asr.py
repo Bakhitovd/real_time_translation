@@ -1,34 +1,20 @@
-import queue
 import numpy as np
-from audio_input import AUDIO_QUEUE
+import torch
 from faster_whisper import WhisperModel
 
-# Queue for passing ASR output (Russian text) to the translation module
-TRANSLATION_QUEUE = queue.Queue()
+# Decide which device to use
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"Loading Faster Whisper model on {DEVICE}...")
 
-# Initialize Faster Whisper model (adjust model size as needed)
-model = WhisperModel("large-v2", device="cuda", compute_type="float16")
+# Load the model (use the appropriate model size; here "small" is used for speed)
+model = WhisperModel("small", device=DEVICE, compute_type="int8")
+print("ASR model loaded.")
 
-def asr_loop():
+def transcribe(audio_np: np.ndarray) -> str:
     """
-    Continuously reads audio data from AUDIO_QUEUE, processes chunks for transcription,
-    and sends the recognized Russian text to TRANSLATION_QUEUE.
+    Transcribe a segment of audio (numpy array) using Faster Whisper.
+    Assumes the input language is Russian.
     """
-    audio_buffer = b""
-    # Threshold: roughly 2 seconds of audio (16k samples, 2 bytes per sample)
-    CHUNK_THRESHOLD = RATE * 2 * 2  # RATE defined in audio_input.py
-    
-    while True:
-        data = AUDIO_QUEUE.get()
-        if data is None:
-            break
-        audio_buffer += data
-        if len(audio_buffer) >= CHUNK_THRESHOLD:
-            # Convert buffer (bytes) to a numpy array of float32 normalized between -1 and 1
-            audio_np = np.frombuffer(audio_buffer, np.int16).astype(np.float32) / 32768.0
-            segments, _ = model.transcribe(audio_np, language="ru", beam_size=1)
-            text = " ".join([seg.text for seg in segments]).strip()
-            if text:
-                print("ASR output:", text)
-                TRANSLATION_QUEUE.put(text)
-            audio_buffer = b""
+    segments, _ = model.transcribe(audio_np, language="ru", beam_size=1)
+    transcription = " ".join([seg.text for seg in segments]).strip()
+    return transcription
