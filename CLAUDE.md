@@ -93,6 +93,12 @@ python mic_test.py [--device DEVICE_INDEX] [--duration SECONDS] [--list-devices]
 # Run continuous transcription and translation
 python translate_mic.py [--device DEVICE_INDEX] [--list-devices] [--chunk-duration SECONDS]
 
+# Run in quiet mode with colored, human-readable output
+python translate_mic.py --quiet
+
+# Run in debug mode with verbose logging
+python translate_mic.py --debug
+
 # Test ASR with a specific audio file
 python asr_simple_test.py
 ```
@@ -138,3 +144,13 @@ python src/main.py
 - Audio capture, transcription, and translation run in separate threads
 - Queues are used to pass data between threads
 - Thread coordination uses standard Python threading primitives
+
+### User Interface
+- Command-line interface with different display modes
+- Quiet mode (`--quiet`) for clean, human-readable output
+- Colored output using the colorama library:
+  - Audio levels displayed in cyan
+  - Russian transcriptions in yellow
+  - English translations in green
+  - Error messages in red
+- Debug mode (`--debug`) for verbose technical logging

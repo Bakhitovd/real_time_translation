@@ -84,6 +84,12 @@ python translate_mic.py
 
 # With specific device
 python translate_mic.py --device YOUR_DEVICE_INDEX
+
+# Quiet mode with cleaner display
+python translate_mic.py --quiet
+
+# Debug mode with verbose logging
+python translate_mic.py --debug
 ```
 
 ## Next Steps

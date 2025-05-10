@@ -16,6 +16,11 @@ import numpy as np
 from typing import Optional
 import threading
 import queue
+import colorama
+from colorama import Fore, Back, Style
+
+# Initialize colorama
+colorama.init()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -28,6 +33,33 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 audio_queue = queue.Queue()
 transcription_queue = queue.Queue()
 stop_event = threading.Event()
+
+# For quiet mode display
+quiet_mode = False
+
+def print_quiet_mode(russian_text, english_text, audio_level=None, error=None):
+    """Display translation information in a clean, colorful format for quiet mode"""
+    if not quiet_mode:
+        return
+
+    # Clear line and move to start
+    sys.stdout.write('\r' + ' ' * 100 + '\r')
+
+    if error:
+        # Print error message
+        sys.stdout.write(f"{Fore.RED}Error: {error}{Style.RESET_ALL}\n")
+    elif audio_level is not None:
+        # Print audio level meter
+        bar_length = int(audio_level / 5)
+        level_bar = '█' * bar_length + '░' * (20 - bar_length)
+        sys.stdout.write(f"{Fore.CYAN}Audio: {audio_level:4.1f}% |{level_bar}|{Style.RESET_ALL}\n")
+    elif russian_text and english_text:
+        # Print transcription and translation
+        sys.stdout.write(f"{Fore.YELLOW}Russian: {russian_text}{Style.RESET_ALL}\n")
+        sys.stdout.write(f"{Fore.GREEN}English: {english_text}{Style.RESET_ALL}\n")
+        sys.stdout.write(f"{Fore.BLUE}{'-' * 50}{Style.RESET_ALL}\n")
+
+    sys.stdout.flush()
 
 def audio_capture_thread(device_index: Optional[int] = None, chunk_duration: float = 3.0):
     """Thread for capturing audio from the microphone"""
@@ -51,15 +83,19 @@ def audio_capture_thread(device_index: Optional[int] = None, chunk_duration: flo
                 
             # Calculate audio level for display
             level = np.max(np.abs(audio_chunk)) * 100
-            
+
             # Skip if level is too low (silence)
             if level < 3.0:
                 continue
-                
-            # Create a simple audio level meter
-            bar_length = int(level / 5)
-            bar = '█' * bar_length + '░' * (20 - bar_length)
-            logger.info(f"Audio level: {level:.1f}% |{bar}|")
+
+            # Display audio level
+            if quiet_mode:
+                print_quiet_mode(None, None, audio_level=level)
+            else:
+                # Create a simple audio level meter
+                bar_length = int(level / 5)
+                bar = '█' * bar_length + '░' * (20 - bar_length)
+                logger.info(f"Audio level: {level:.1f}% |{bar}|")
             
             # Add the chunk to the queue for processing
             audio_queue.put(audio_chunk)
@@ -91,12 +127,16 @@ def transcription_thread():
                 
                 # Check if we got any transcription
                 if transcription:
-                    logger.info(f"Russian transcription: \"{transcription}\"")
-                    
+                    if not quiet_mode:
+                        logger.info(f"Russian transcription: \"{transcription}\"")
+
                     # Add to the transcription queue for translation
                     transcription_queue.put(transcription)
                 else:
-                    logger.info("No transcription returned")
+                    if quiet_mode:
+                        print_quiet_mode(None, None, error="No transcription returned")
+                    else:
+                        logger.info("No transcription returned")
                     
                 # Mark the task as done
                 audio_queue.task_done()
@@ -132,12 +172,17 @@ def translation_thread():
                 
                 # Display the translation
                 if translated_text:
-                    logger.info(f"English translation: \"{translated_text}\"")
-                    
-                    # Display a separator for readability
-                    logger.info("-" * 80)
+                    if quiet_mode:
+                        print_quiet_mode(transcription, translated_text)
+                    else:
+                        logger.info(f"English translation: \"{translated_text}\"")
+                        # Display a separator for readability
+                        logger.info("-" * 80)
                 else:
-                    logger.info("No translation returned")
+                    if quiet_mode:
+                        print_quiet_mode(None, None, error="No translation returned")
+                    else:
+                        logger.info("No translation returned")
                     
                 # Mark the task as done
                 transcription_queue.task_done()
@@ -155,7 +200,19 @@ def main():
     parser.add_argument("--device", type=int, help="PyAudio device index")
     parser.add_argument("--list-devices", action="store_true", help="List available audio devices and exit")
     parser.add_argument("--chunk-duration", type=float, default=3.0, help="Duration of each audio chunk in seconds")
+    parser.add_argument("--quiet", "-q", action="store_true", help="Quiet mode - show only translations without technical details")
+    parser.add_argument("--debug", "-d", action="store_true", help="Debug mode - show verbose logging")
     args = parser.parse_args()
+
+    # Set logging level based on arguments
+    global quiet_mode
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
+    elif args.quiet:
+        quiet_mode = True
+        logging.getLogger().setLevel(logging.ERROR)  # Only show errors
+        print(f"{Fore.CYAN}Starting in quiet mode. Press Ctrl+C to stop.{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}Loading models, please wait...{Style.RESET_ALL}")
     
     try:
         # Import modules to check they're available
@@ -206,14 +263,21 @@ def main():
                 time.sleep(0.1)
                 
         except KeyboardInterrupt:
-            logger.info("Stopping threads...")
+            if quiet_mode:
+                print(f"\n{Fore.CYAN}Stopping translation...{Style.RESET_ALL}")
+            else:
+                logger.info("Stopping threads...")
+
             stop_event.set()
-            
+
             # Wait for threads to finish
             for thread in threads:
                 thread.join(timeout=2.0)
-                
-            logger.info("All threads stopped")
+
+            if quiet_mode:
+                print(f"{Fore.CYAN}Translation stopped.{Style.RESET_ALL}")
+            else:
+                logger.info("All threads stopped")
             
         return True
         
