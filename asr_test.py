@@ -31,7 +31,7 @@ asr_pipeline = pipeline(
 )
 
 # Path to your local audio file (update the path as needed)
-audio_path = "speech_en.mp3"
+audio_path = "speech_ru.mp3"
 
 # Perform transcription
 result = asr_pipeline(audio_path, return_timestamps=True)

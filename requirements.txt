@@ -1,9 +1,18 @@
-numpy
-faster-whisper
-torch
-noisereduce
+# Core
+numpy<2
 soundfile
-openai
+noisereduce
 pyaudio
 python-dotenv
-tkinter
+
+# Torch with GPU support (CUDA 11.8)
+torch==2.2.2+cu118
+torchvision==0.17.2+cu118
+torchaudio==2.2.2+cu118
+--extra-index-url https://download.pytorch.org/whl/cu118
+
+# AI Models
+faster-whisper
+transformers==4.40.1
+accelerate
+openai
