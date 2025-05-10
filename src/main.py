@@ -16,7 +16,7 @@ def main():
     tts_accum = np.array([], dtype=np.float32)
     
     # Target accumulation duration in seconds (1 minute)
-    target_duration = 20  
+    target_duration = 15 
     target_samples = target_duration * RATE
 
     for i, audio_np in enumerate(audio_server()):

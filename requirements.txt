@@ -4,4 +4,6 @@ torch
 noisereduce
 soundfile
 openai
-kokoro>=0.3.4
+pyaudio
+python-dotenv
+tkinter

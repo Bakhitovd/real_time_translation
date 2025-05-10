@@ -1,0 +1,169 @@
+import numpy as np
+import pyaudio
+import time
+import noisereduce as nr
+
+# === Audio Configuration ===
+RATE = 16000            # Sampling rate (Hz)
+CHUNK = 1024            # Samples per buffer
+CHANNELS = 1            # Mono audio
+FORMAT = pyaudio.paInt16  # 16-bit audio
+
+class MicrophoneStreamer:
+    """
+    Handles audio capture from USB microphone with configurable parameters.
+    """
+    
+    def __init__(self, chunk_duration=3, device_index=None, apply_noise_reduction=True):
+        """
+        Initialize the microphone streamer.
+        
+        Args:
+            chunk_duration (float): Duration of each audio chunk in seconds
+            device_index (int, optional): PyAudio device index. If None, uses default.
+            apply_noise_reduction (bool): Whether to apply noise reduction
+        """
+        self.chunk_duration = chunk_duration
+        self.device_index = device_index
+        self.apply_noise_reduction = apply_noise_reduction
+        self.buffer_size = int(RATE * chunk_duration)
+        self.p = None
+        self.stream = None
+        self.is_active = False
+        
+    def list_devices(self):
+        """
+        List available input devices with their indices.
+        
+        Returns:
+            List of (index, name) tuples for available input devices
+        """
+        if not self.p:
+            self.p = pyaudio.PyAudio()
+            
+        devices = []
+        info = self.p.get_host_api_info_by_index(0)
+        numdevices = info.get('deviceCount')
+        
+        for i in range(0, numdevices):
+            device_info = self.p.get_device_info_by_host_api_device_index(0, i)
+            if device_info.get('maxInputChannels') > 0:
+                devices.append((i, device_info.get('name')))
+                
+        return devices
+    
+    def start(self):
+        """
+        Start the microphone stream.
+        """
+        if self.is_active:
+            return
+            
+        if not self.p:
+            self.p = pyaudio.PyAudio()
+        
+        # Open the microphone stream
+        self.stream = self.p.open(
+            format=FORMAT,
+            channels=CHANNELS,
+            rate=RATE,
+            input=True,
+            input_device_index=self.device_index,
+            frames_per_buffer=CHUNK
+        )
+        
+        self.is_active = True
+        print(f"Microphone stream started with chunk duration: {self.chunk_duration}s")
+        
+    def stop(self):
+        """
+        Stop the microphone stream and release resources.
+        """
+        if not self.is_active:
+            return
+            
+        if self.stream:
+            self.stream.stop_stream()
+            self.stream.close()
+            self.stream = None
+            
+        if self.p:
+            self.p.terminate()
+            self.p = None
+            
+        self.is_active = False
+        print("Microphone stream stopped")
+        
+    def get_audio_chunk(self):
+        """
+        Capture a single audio chunk of duration chunk_duration.
+        
+        Returns:
+            audio_np (numpy.ndarray): Audio data as float32 numpy array,
+                                     normalized to range [-1.0, 1.0]
+        """
+        if not self.is_active or not self.stream:
+            self.start()
+            
+        # Collect audio for chunk_duration seconds
+        frames = []
+        for _ in range(0, int(RATE / CHUNK * self.chunk_duration)):
+            data = self.stream.read(CHUNK, exception_on_overflow=False)
+            frames.append(data)
+        
+        # Concatenate all frames into a single buffer
+        audio_data = b''.join(frames)
+        
+        # Convert to normalized numpy array (float32 in range [-1.0, 1.0])
+        audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
+        
+        # Apply noise reduction if enabled
+        if self.apply_noise_reduction:
+            audio_np = nr.reduce_noise(y=audio_np, sr=RATE, stationary=False)
+            
+        return audio_np
+        
+    def stream_audio(self):
+        """
+        Generator that continuously yields audio chunks.
+        
+        Yields:
+            audio_np (numpy.ndarray): Audio data as float32 numpy array
+        """
+        try:
+            self.start()
+            while self.is_active:
+                yield self.get_audio_chunk()
+                
+        except KeyboardInterrupt:
+            print("Audio stream interrupted")
+        finally:
+            self.stop()
+
+
+# Simple usage example
+def main():
+    """
+    Example usage of the MicrophoneStreamer class.
+    """
+    streamer = MicrophoneStreamer(chunk_duration=3)
+    
+    # List available devices
+    devices = streamer.list_devices()
+    print("Available input devices:")
+    for idx, name in devices:
+        print(f"  [{idx}] {name}")
+        
+    # Start streaming and process 5 chunks
+    for i, audio_chunk in enumerate(streamer.stream_audio()):
+        if i >= 5:
+            break
+            
+        # Calculate and print RMS level for this chunk
+        rms = np.sqrt(np.mean(audio_chunk ** 2))
+        print(f"Chunk {i+1} - RMS level: {rms:.4f}")
+        
+        # Here you would typically pass the audio to ASR
+
+if __name__ == "__main__":
+    main()
