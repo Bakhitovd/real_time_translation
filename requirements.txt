@@ -17,3 +17,5 @@ faster-whisper
 transformers==4.40.1
 accelerate
 openai
+pyttsx3
+pyyaml

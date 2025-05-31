@@ -1,0 +1,20 @@
+# Configuration for crawl phase translation pipeline
+openai_api_key_env: OPENAI_API_KEY
+
+model:
+  # Whisper model size for ASR: tiny, base, small, medium, large
+  asr: small
+  # OpenAI model for machine translation
+  mt_engine: gpt-4.1-mini
+  # Coqui TTS voice models per language
+  voice_models:
+    en: tts_models/en/vctk/vits
+    ru: tts_models/ru/oksana/vits
+
+coqui:
+  # Enable GPU acceleration for TTS
+  use_cuda: true
+
+logging:
+  # Logging level: DEBUG, INFO, WARNING, ERROR
+  level: INFO
