@@ -66,18 +66,31 @@ class TranslationApp {
     setupEventListeners() {
         this.startBtn.addEventListener('click', () => this.startTranslation());
         this.stopBtn.addEventListener('click', () => this.stopTranslation());
-        this.micBtn.addEventListener('click', () => this.toggleMicrophone());
+        
+        // Add microphone event listener (ensure element exists)
+        if (this.micBtn) {
+            this.micBtn.addEventListener('click', () => {
+                console.log('Microphone button clicked');
+                this.toggleMicrophone();
+            });
+        } else {
+            console.error('Microphone button not found');
+        }
         
         // Language selection
-        this.sourceLangSelect.addEventListener('change', (e) => {
-            this.config.source_lang = e.target.value;
-            this.updateConfig();
-        });
+        if (this.sourceLangSelect) {
+            this.sourceLangSelect.addEventListener('change', (e) => {
+                this.config.source_lang = e.target.value;
+                this.updateConfig();
+            });
+        }
         
-        this.targetLangSelect.addEventListener('change', (e) => {
-            this.config.target_lang = e.target.value;
-            this.updateConfig();
-        });
+        if (this.targetLangSelect) {
+            this.targetLangSelect.addEventListener('change', (e) => {
+                this.config.target_lang = e.target.value;
+                this.updateConfig();
+            });
+        }
     }
     
     async startTranslation() {

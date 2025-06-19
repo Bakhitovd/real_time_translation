@@ -5,6 +5,7 @@ WebSocket API routes for audio streaming and translation.
 import asyncio
 import json
 import logging
+import time
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.asr import transcribe_chunk
 from app.mt import translate_text
@@ -33,39 +34,56 @@ async def websocket_translate(ws: WebSocket):
         logging.info("WebSocket translation session started")
         
         while True:
-            # Check if we received text (config) or bytes (audio)
-            try:
-                # Try to receive as text first (for config messages)
-                message = await ws.receive_text()
-                config_data = json.loads(message)
-                
-                if config_data.get("type") == "config":
-                    source_lang = config_data.get("source_lang", "auto")
-                    target_lang = config_data.get("target_lang", "en")
-                    logging.info(f"Updated translation config: {source_lang} -> {target_lang}")
-                    
-                    # Send acknowledgment
-                    await ws.send_text(json.dumps({
-                        "type": "config_ack",
-                        "source_lang": source_lang,
-                        "target_lang": target_lang
-                    }))
-                
-            except:
-                # If not text, try to receive as bytes (audio data)
+            # Receive message generically first
+            message = await ws.receive()
+            
+            # Handle text messages (config)
+            if message["type"] == "websocket.receive" and "text" in message:
                 try:
-                    audio_data = await ws.receive_bytes()
+                    config_data = json.loads(message["text"])
+                    
+                    if config_data.get("type") == "config":
+                        source_lang = config_data.get("source_lang", "auto")
+                        target_lang = config_data.get("target_lang", "en")
+                        logging.info(f"Updated translation config: {source_lang} -> {target_lang}")
+                        
+                        # Send acknowledgment
+                        await ws.send_text(json.dumps({
+                            "type": "config_ack",
+                            "source_lang": source_lang,
+                            "target_lang": target_lang
+                        }))
+                except Exception as e:
+                    logging.error(f"Error processing config: {e}")
+            
+            # Handle binary messages (audio)
+            elif message["type"] == "websocket.receive" and "bytes" in message:
+                try:
+                    audio_data = message["bytes"]
                     
                     if len(audio_data) > 0:
+                        # Debug: Log audio data info
+                        logging.info(f"Received audio data: {len(audio_data)} bytes")
+                        
+                        # Save raw audio for debugging (first few chunks only)
+                        if len(audio_data) > 1000:  # Only save substantial chunks
+                            debug_path = f"debug_audio_{int(time.time())}.webm"
+                            with open(debug_path, "wb") as f:
+                                f.write(audio_data)
+                            logging.info(f"Saved debug audio to: {debug_path}")
+                        
                         # Process audio through translation pipeline
                         translated_audio = await process_audio_pipeline(
                             audio_data, source_lang, target_lang
                         )
                         
                         if translated_audio:
+                            logging.info(f"Sending translated audio: {len(translated_audio)} bytes")
                             # Send translated audio back to client
                             await ws.send_bytes(translated_audio)
-                        
+                        else:
+                            logging.warning("No translated audio produced")
+                            
                 except Exception as e:
                     logging.error(f"Error processing audio: {e}")
                     await ws.send_text(json.dumps({
