@@ -1,21 +1,23 @@
-# Core
-numpy<2
-soundfile
-noisereduce
-pyaudio
+# Web framework and server
+fastapi
+uvicorn[standard]
+pydantic
+python-multipart
+
+# Configuration and utilities
+PyYAML
 python-dotenv
-colorama
 
-# Torch with GPU support (CUDA 11.8)
-torch==2.2.2+cu118
-torchvision==0.17.2+cu118
-torchaudio==2.2.2+cu118
---extra-index-url https://download.pytorch.org/whl/cu118
-
-# AI Models
+# ASR (Speech-to-Text)
 faster-whisper
-transformers==4.40.1
-accelerate
+soundfile
+
+# Machine Translation
 openai
+
+# TTS (Text-to-Speech)
 pyttsx3
-pyyaml
+
+# Audio processing
+numpy
+ffmpeg-python
