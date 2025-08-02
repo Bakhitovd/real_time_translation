@@ -1,21 +1,22 @@
-## Brief overview
-  - Guidelines for collaborative R&D and MVP development.
-  - Emphasis on careful, thoughtful planning before implementation, with a focus on modularity, testability, and clear reasoning for each step.
+# Micro-Unit Rules (R&D Transparency)
 
-## Communication style
-  - Prioritize clarity and directness; avoid unnecessary verbosity.
-  - All plans and proposals must include explicit reasoning for each step, not just a list of actions.
+## Iteration policy
+- Never propose more than **one module** per Act cycle.
+- Each module **≤ 150 LOC**; no external I/O; pure functions preferred.
+- Mandatory tests:
+  - pytest + hypothesis, ≥ 25 random cases
+  - coverage ≥ 90 % on the new file
 
-## Development workflow
-  - Always begin with a comprehensive, step-by-step plan before any code is written.
-  - Plans should anticipate possible roadblocks and include fallback strategies.
+## Approved cycle  (THINK → PLAN_STEP → CODE → TEST)
+1. **THINK**: you (human) jot down intent and constraints.
+2. **PLAN_STEP**: Cline drafts roadmap for *one* file + its tests.
+3. You approve.
+4. **CODE** (Act mode): Cline writes code & tests.
+5. **TEST**: Cline runs pytest; must pass coverage gate.
+6. Loop to step 1 for the next module.
 
-## Coding best practices
-  - Favor modular, testable code with clear interfaces between components.
-  - Avoid unnecessary complexity
-  - Documentation and logging are required for all major components and flows.
-
-## Other guidelines
-  - All configuration should be externalized (e.g., config.yaml) for easy swapping of models/services.
-  - Testing and validation strategies must be defined before implementation.
-  - UI/UX should be minimal but functional, with a focus on enabling rapid iteration and testing.
+## Act-mode blast radius
+act:
+  allowedPaths:
+    - src/**
+    - tests/**
