@@ -105,3 +105,36 @@ def list_voices() -> list:
     """List available TTS voices."""
     tts = get_tts_instance()
     return tts.get_available_voices()
+
+def initialize_tts(voice: Optional[str] = None, rate: int = 150, volume: float = 0.9) -> None:
+    """Initialize TTS engine at startup to eliminate first-request delay.
+    
+    Args:
+        voice: Voice to use (None for default)
+        rate: Speech rate (words per minute)
+        volume: Volume level (0.0 to 1.0)
+    """
+    global _tts_instance
+    logging.info("Initializing TTS engine...")
+    _tts_instance = StreamingTTS(voice, rate, volume)
+    
+    # Test synthesis to ensure everything works
+    try:
+        test_audio = _tts_instance.synthesize_text("System initialized")
+        if test_audio:
+            logging.info("TTS engine test synthesis successful")
+        else:
+            logging.warning("TTS engine test synthesis failed")
+    except Exception as e:
+        logging.warning(f"TTS engine test failed: {e}")
+
+def cleanup_tts() -> None:
+    """Clean up TTS engine resources."""
+    global _tts_instance
+    if _tts_instance and _tts_instance.engine:
+        try:
+            _tts_instance.engine.stop()
+            logging.info("TTS engine stopped")
+        except:
+            pass
+    _tts_instance = None

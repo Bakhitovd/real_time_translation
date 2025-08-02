@@ -73,16 +73,25 @@ async def websocket_translate(ws: WebSocket):
                             logging.info(f"Saved debug audio to: {debug_path}")
                         
                         # Process audio through translation pipeline
-                        translated_audio = await process_audio_pipeline(
+                        translated_audio, pipeline_info = await process_audio_pipeline(
                             audio_data, source_lang, target_lang
                         )
                         
-                        if translated_audio:
+                        if pipeline_info["success"] and translated_audio:
                             logging.info(f"Sending translated audio: {len(translated_audio)} bytes")
                             # Send translated audio back to client
                             await ws.send_bytes(translated_audio)
                         else:
-                            logging.warning("No translated audio produced")
+                            # Send detailed error information to client
+                            error_msg = pipeline_info.get("error", "Unknown pipeline error")
+                            logging.warning(f"Pipeline failed: {error_msg}")
+                            
+                            await ws.send_text(json.dumps({
+                                "type": "pipeline_error",
+                                "message": error_msg,
+                                "stages": pipeline_info.get("stages", {}),
+                                "total_latency": pipeline_info.get("total_latency", 0)
+                            }))
                             
                 except Exception as e:
                     logging.error(f"Error processing audio: {e}")
@@ -96,8 +105,8 @@ async def websocket_translate(ws: WebSocket):
     except Exception as e:
         logging.error(f"WebSocket error: {e}")
         
-async def process_audio_pipeline(audio_data: bytes, source_lang: str, target_lang: str) -> bytes:
-    """Process audio through ASR -> MT -> TTS pipeline.
+async def process_audio_pipeline(audio_data: bytes, source_lang: str, target_lang: str) -> tuple[bytes, dict]:
+    """Process audio through ASR -> MT -> TTS pipeline with detailed error reporting.
 
     Args:
         audio_data: Raw audio bytes (WebM/Opus format from frontend)
@@ -105,39 +114,120 @@ async def process_audio_pipeline(audio_data: bytes, source_lang: str, target_lan
         target_lang: Target language code
 
     Returns:
-        Translated audio bytes (WAV format)
+        Tuple of (translated_audio_bytes, pipeline_info_dict)
+        If processing fails, returns (b"", error_info_dict)
     """
+    pipeline_start = time.time()
+    pipeline_info = {
+        "success": False,
+        "stages": {},
+        "total_latency": 0,
+        "error": None
+    }
+    
     try:
-        # Step 0: Convert WebM/Opus to WAV/PCM
+        # Step 0: Audio Format Conversion
+        stage_start = time.time()
+        logging.info("Starting audio format conversion...")
+        
         wav_audio = convert_audio_to_wav(audio_data, input_format="webm")
+        
+        conversion_time = time.time() - stage_start
+        pipeline_info["stages"]["conversion"] = {
+            "success": True,
+            "latency": conversion_time,
+            "input_size": len(audio_data),
+            "output_size": len(wav_audio)
+        }
+        logging.info(f"Audio conversion completed in {conversion_time*1000:.1f}ms")
 
         # Step 1: Speech-to-Text (ASR)
-        logging.debug("Starting ASR...")
+        stage_start = time.time()
+        logging.info("Starting ASR (Speech-to-Text)...")
+        
         transcript = transcribe_chunk(wav_audio, language=source_lang if source_lang != "auto" else None)
+        
+        asr_time = time.time() - stage_start
+        pipeline_info["stages"]["asr"] = {
+            "success": True,
+            "latency": asr_time,
+            "transcript": transcript,
+            "transcript_length": len(transcript.strip())
+        }
 
         if not transcript.strip():
-            logging.debug("No speech detected in audio chunk")
-            return b""
+            logging.info("No speech detected in audio chunk")
+            pipeline_info["stages"]["asr"]["success"] = False
+            pipeline_info["error"] = "No speech detected"
+            return b"", pipeline_info
 
-        logging.debug(f"ASR result: '{transcript[:50]}...'")
+        logging.info(f"ASR completed in {asr_time*1000:.1f}ms: '{transcript[:50]}{'...' if len(transcript) > 50 else ''}'")
 
         # Step 2: Machine Translation (MT)
-        logging.debug("Starting MT...")
+        stage_start = time.time()
+        logging.info("Starting MT (Machine Translation)...")
+        
         translated_text = await translate_text(transcript, source_lang, target_lang)
+        
+        mt_time = time.time() - stage_start
+        pipeline_info["stages"]["mt"] = {
+            "success": True,
+            "latency": mt_time,
+            "original_text": transcript,
+            "translated_text": translated_text,
+            "translation_length": len(translated_text.strip())
+        }
 
         if not translated_text.strip():
-            logging.debug("Translation resulted in empty text")
-            return b""
+            logging.warning("Translation resulted in empty text")
+            pipeline_info["stages"]["mt"]["success"] = False
+            pipeline_info["error"] = "Translation produced empty result"
+            return b"", pipeline_info
 
-        logging.debug(f"MT result: '{translated_text[:50]}...'")
+        logging.info(f"MT completed in {mt_time*1000:.1f}ms: '{translated_text[:50]}{'...' if len(translated_text) > 50 else ''}'")
 
         # Step 3: Text-to-Speech (TTS)
-        logging.debug("Starting TTS...")
+        stage_start = time.time()
+        logging.info("Starting TTS (Text-to-Speech)...")
+        
         translated_audio = synthesize_text(translated_text)
+        
+        tts_time = time.time() - stage_start
+        pipeline_info["stages"]["tts"] = {
+            "success": True,
+            "latency": tts_time,
+            "input_text": translated_text,
+            "output_size": len(translated_audio)
+        }
 
-        logging.debug(f"TTS completed: {len(translated_audio)} bytes")
-        return translated_audio
+        if not translated_audio:
+            logging.error("TTS synthesis failed - no audio output")
+            pipeline_info["stages"]["tts"]["success"] = False
+            pipeline_info["error"] = "TTS synthesis failed"
+            return b"", pipeline_info
+
+        logging.info(f"TTS completed in {tts_time*1000:.1f}ms: {len(translated_audio)} bytes")
+
+        # Pipeline Success
+        total_time = time.time() - pipeline_start
+        pipeline_info.update({
+            "success": True,
+            "total_latency": total_time
+        })
+        
+        logging.info(f"Pipeline completed successfully in {total_time*1000:.1f}ms total")
+        return translated_audio, pipeline_info
 
     except Exception as e:
-        logging.error(f"Pipeline error: {e}")
-        return b""
+        total_time = time.time() - pipeline_start
+        error_msg = str(e)
+        logging.error(f"Pipeline error after {total_time*1000:.1f}ms: {error_msg}")
+        
+        pipeline_info.update({
+            "success": False,
+            "total_latency": total_time,
+            "error": error_msg,
+            "error_type": type(e).__name__
+        })
+        
+        return b"", pipeline_info

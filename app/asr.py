@@ -75,6 +75,18 @@ def get_asr_instance(model_size: str = "small", device: str = "cpu") -> Streamin
         _asr_instance = StreamingASR(model_size, device)
     return _asr_instance
 
+def preload_model(model_size: str = "small", device: str = "cpu") -> None:
+    """Preload the Whisper model to eliminate first-request delay.
+    
+    Args:
+        model_size: Whisper model size (tiny, base, small, medium, large)
+        device: Device to run on (cpu, cuda)
+    """
+    global _asr_instance
+    logging.info(f"Preloading Whisper model '{model_size}' on {device}...")
+    _asr_instance = StreamingASR(model_size, device)
+    logging.info("Whisper model preloaded successfully")
+
 def transcribe_chunk(audio_bytes: bytes, language: Optional[str] = None) -> str:
     """Convenience function to transcribe audio chunk using global ASR instance.
     

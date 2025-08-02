@@ -176,10 +176,20 @@ class TranslationApp {
             // Text message (config acknowledgment or error)
             try {
                 const message = JSON.parse(event.data);
+                
                 if (message.type === 'config_ack') {
                     console.log('Config updated:', message);
+                    this.updateStatus(`Translation configured: ${message.source_lang} → ${message.target_lang}`);
+                    
                 } else if (message.type === 'error') {
                     this.updateStatus(`Error: ${message.message}`);
+                    console.error('WebSocket error:', message);
+                    
+                } else if (message.type === 'pipeline_error') {
+                    this.handlePipelineError(message);
+                    
+                } else {
+                    console.log('Unknown message type:', message);
                 }
             } catch (e) {
                 console.error('Failed to parse message:', e);
@@ -187,6 +197,52 @@ class TranslationApp {
         } else {
             // Binary message (translated audio)
             this.playTranslatedAudio(event.data);
+        }
+    }
+    
+    handlePipelineError(errorMessage) {
+        const { message, stages, total_latency } = errorMessage;
+        
+        console.error('Pipeline error:', errorMessage);
+        
+        // Determine which stage failed
+        let failedStage = 'unknown';
+        if (stages) {
+            for (const [stage, info] of Object.entries(stages)) {
+                if (info.success === false) {
+                    failedStage = stage;
+                    break;
+                }
+            }
+        }
+        
+        // Create user-friendly error message
+        let userMessage;
+        switch (failedStage) {
+            case 'conversion':
+                userMessage = 'Audio format conversion failed. Please check your microphone.';
+                break;
+            case 'asr':
+                userMessage = message === 'No speech detected' ? 
+                    'No speech detected. Please speak more clearly.' :
+                    'Speech recognition failed. Please try again.';
+                break;
+            case 'mt':
+                userMessage = 'Translation failed. Please check your internet connection.';
+                break;
+            case 'tts':
+                userMessage = 'Speech synthesis failed. Please try again.';
+                break;
+            default:
+                userMessage = `Translation error: ${message}`;
+        }
+        
+        this.updateStatus(`${userMessage} (${failedStage} stage)`);
+        
+        // Log detailed information for debugging
+        if (stages) {
+            console.log('Pipeline stages:', stages);
+            console.log(`Total latency: ${(total_latency * 1000).toFixed(1)}ms`);
         }
     }
     
