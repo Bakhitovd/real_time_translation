@@ -23,3 +23,44 @@ dist/
 
 # System files
 .DS_Store
+
+# Testing
+.coverage
+.pytest_cache/
+htmlcov/
+.tox/
+.nox/
+
+# Audio files and directories
+input_audio/
+output_audio/
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a
+*.aac
+*.wma
+
+# Logs
+logs/
+*.log
+
+# ML/AI model cache
+.cache/
+models/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.model
+
+# Temporary files
+*.tmp
+*.temp
+.tmp/
+
+# Configuration with secrets
+*.env.local
+*.env.production
+config.local.yaml

@@ -1,0 +1,4 @@
+# file: C:\projects\real_time_trans\app\realtime_queue.py
+# hypothesis_version: 6.136.7
+
+[0.0, 1.0, 3.0, 5.0, 1000, 'is_queue_full', 'is_running', 'max_queue_size', 'priority_queue_size', 'queue_overflows', 'queue_size', 'tasks_enqueued', 'tasks_failed', 'tasks_processed', 'worker_count']

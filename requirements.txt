@@ -21,3 +21,8 @@ pyttsx3
 # Audio processing
 numpy
 ffmpeg-python
+
+# Testing dependencies
+pytest
+pytest-cov
+hypothesis

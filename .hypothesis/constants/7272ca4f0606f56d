@@ -1,0 +1,4 @@
+# file: C:\projects\real_time_trans\app\streaming_buffer.py
+# hypothesis_version: 6.136.7
+
+[0.0, 0.5, 150, 200, 400, 500, 800, 1000, 4000, 5000, 'Buffer cleared', 'is_segment_ready', 'newest_chunk_age_ms', 'oldest_chunk_age_ms', 'time_since_speech_ms', 'total_chunks', 'total_duration_ms']
