@@ -14,6 +14,11 @@ soundfile
 
 # Machine Translation
 openai
+transformers==4.41.2
+torch
+sentencepiece
+sacremoses
+httpx
 
 # TTS (Text-to-Speech)
 pyttsx3
@@ -26,4 +31,5 @@ pydub
 # Testing dependencies
 pytest
 pytest-cov
+pytest-asyncio
 hypothesis

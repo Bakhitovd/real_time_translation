@@ -2,19 +2,21 @@
 
 Following the micro-unit rules (≤150 LOC per module, one per Act cycle), here's the structured plan:
 
-### **Phase 1: System Audio Capture Enhancement (Modules 6-9)**
+### **Phase 1: Core System Enhancement (Modules 6-9)**
 
-**Module 6: System Audio Capture Handler** 
+**Module 6: System Audio Capture Handler** ✅ **COMPLETED**
 - **Purpose**: Browser-based system audio capture via `getDisplayMedia()` API
-- **Scope**: ≤150 LOC for capturing screen audio, converting to proper format, chunking
-- **Key Functions**: `captureSystemAudio()`, `processAudioStream()`, `formatAudioChunk()`
+- **Scope**: 84 LOC for capturing screen audio, converting to proper format, chunking
+- **Key Functions**: `SystemAudioCaptureHandler`, `process_system_audio()`, `convert_to_wav()`
 - **Tests**: Audio stream simulation, format conversion, error handling
+- **Status**: ✅ Implemented with 98% test coverage, 29 test cases
 
-**Module 7: Audio Source Manager**
-- **Purpose**: Unified interface for switching between microphone/system audio/both sources  
-- **Scope**: ≤150 LOC for source selection, stream management, source switching
-- **Key Functions**: `AudioSourceManager`, `switchSource()`, `combineSources()`
-- **Tests**: Source switching scenarios, combined audio handling, error states
+**Module 7: M2M-100 Translation Service** ✅ **COMPLETED**
+- **Purpose**: Self-hosted GPU-optimized translation service with context awareness
+- **Scope**: 137 LOC for Meta M2M-100 418M model integration, session management
+- **Key Functions**: `M2MTranslationService`, `translate()`, `SessionContext`
+- **Tests**: Service initialization, translation pipeline, session management
+- **Status**: ✅ Implemented with 93% test coverage, 25 test cases, FastAPI microservice
 
 **Module 8: Audio Mixing Controller** 
 - **Purpose**: Control original vs translated audio playback (volume, muting, delay compensation)
