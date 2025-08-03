@@ -8,7 +8,7 @@ env/
 venv/
 .venv/
 *.env
-
+.hypothesis/
 # Distribution / packaging
 build/
 dist/

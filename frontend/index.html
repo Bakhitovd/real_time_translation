@@ -13,6 +13,41 @@
         <button id="start-btn">Start</button>
         <button id="stop-btn" disabled>Stop</button>
     </div>
+    
+    <!-- Debug Panel -->
+    <div id="debug-panel" style="margin-top: 20px; border: 1px solid #ccc; padding: 15px; border-radius: 5px;">
+        <h3>🔍 Pipeline Debug Status</h3>
+        <div id="pipeline-stages" style="margin: 10px 0;">
+            <div class="stage" id="asr-stage" style="margin: 5px 0; padding: 8px; border-radius: 3px; background: #f5f5f5;">
+                🎤 <strong>Speech Recognition:</strong> <span class="status" id="asr-status">Ready</span>
+                <div class="stage-detail" id="asr-detail" style="font-size: 0.9em; color: #666; margin-top: 3px;"></div>
+            </div>
+            <div class="stage" id="mt-stage" style="margin: 5px 0; padding: 8px; border-radius: 3px; background: #f5f5f5;">
+                🌐 <strong>Translation:</strong> <span class="status" id="mt-status">Ready</span>
+                <div class="stage-detail" id="mt-detail" style="font-size: 0.9em; color: #666; margin-top: 3px;"></div>
+            </div>
+            <div class="stage" id="tts-stage" style="margin: 5px 0; padding: 8px; border-radius: 3px; background: #f5f5f5;">
+                🔊 <strong>Speech Synthesis:</strong> <span class="status" id="tts-status">Ready</span>
+                <div class="stage-detail" id="tts-detail" style="font-size: 0.9em; color: #666; margin-top: 3px;"></div>
+            </div>
+        </div>
+        
+        <div id="transcript-display" style="margin: 10px 0; padding: 8px; background: #e8f4fd; border-radius: 3px;">
+            <strong>📝 Latest Transcript:</strong> <span id="transcript-text" style="font-style: italic;">Listening...</span>
+        </div>
+        
+        <div id="translation-display" style="margin: 10px 0; padding: 8px; background: #e8f5e8; border-radius: 3px;">
+            <strong>🔄 Latest Translation:</strong> <span id="translation-text" style="font-style: italic;">Waiting...</span>
+        </div>
+        
+        <div id="performance-display" style="margin: 10px 0; padding: 8px; background: #fef7e0; border-radius: 3px;">
+            <strong>⚡ Performance:</strong> <span id="performance-text">Total: 0ms | ASR: 0ms | MT: 0ms | TTS: 0ms</span>
+        </div>
+        
+        <div id="debug-log" style="margin: 10px 0; max-height: 150px; overflow-y: auto; font-family: monospace; font-size: 0.8em; background: #f8f8f8; padding: 8px; border-radius: 3px;">
+        </div>
+    </div>
+    
     <div id="status"></div>
     <script src="/static/app.js"></script>
 </body>

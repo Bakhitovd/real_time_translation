@@ -266,7 +266,7 @@ def create_optimized_queue() -> AsyncProcessingQueue:
     config = QueueConfig(
         max_queue_size=30,  # Smaller queue for low latency
         worker_count=2,     # Balanced for typical CPU cores
-        task_timeout_sec=3.0,  # Strict timeout for real-time requirements
+        task_timeout_sec=10.0,  # Increased timeout for OpenAI API calls
         enable_priority_queue=True
     )
     return AsyncProcessingQueue(config)

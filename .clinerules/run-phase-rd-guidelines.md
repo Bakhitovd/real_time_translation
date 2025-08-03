@@ -15,8 +15,18 @@
 5. **TEST**: Cline runs pytest; must pass coverage gate.
 6. Loop to step 1 for the next module.
 
+
+
 ## Act-mode blast radius
 act:
   allowedPaths:
     - src/**
     - tests/**
+
+
+## Documentation approach
+- Create comprehensive technical reports after module completion
+- Include architecture diagrams and integration examples
+- Document performance characteristics and deployment considerations
+- Provide production tuning guidelines and scaling recommendations
+- Include future enhancement roadmaps

@@ -1,43 +1,236 @@
 """
-WebSocket API routes for audio streaming and translation.
+WebSocket API routes for concurrent real-time audio translation.
+Module 5: Concurrent Pipeline Integration with session-based coordination.
 """
 
 import asyncio
 import json
 import logging
 import time
+import uuid
+from typing import Optional, Dict, Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.asr import transcribe_chunk
 from app.mt import translate_text
 from app.tts import synthesize_text
 from app.config import load_config
 from app.utils import convert_audio_to_wav
+from app.pipeline_coordinator import (
+    StreamingPipelineCoordinator, 
+    create_pipeline_coordinator,
+    create_realtime_config,
+    PipelineResult
+)
+from app.realtime_queue import ProcessingTask, ProcessingResult
+from app.latency_monitor import create_latency_monitor
+import io
+import numpy as np
+import soundfile as sf
 
 router = APIRouter()
 
+# Session registry for cleanup and monitoring
+active_sessions: Dict[str, StreamingPipelineCoordinator] = {}
+
+def generate_session_id() -> str:
+    """Generate unique session identifier."""
+    return f"session_{uuid.uuid4().hex[:8]}_{int(time.time())}"
+
+def detect_speech_activity(audio_data: bytes, sensitivity: float = 0.8) -> tuple[bool, dict]:
+    """
+    Enhanced voice activity detection with confidence scoring.
+    
+    Args:
+        audio_data: WAV audio bytes
+        sensitivity: Detection sensitivity (0.0-1.0, higher = more sensitive)
+    
+    Returns:
+        (has_speech: bool, metadata: dict) with confidence and energy metrics
+    """
+    try:
+        # Convert bytes to audio array
+        audio_io = io.BytesIO(audio_data)
+        audio_array, sample_rate = sf.read(audio_io)
+        
+        if len(audio_array) == 0:
+            return False, {"energy": 0.0, "confidence": 0.0}
+        
+        # Calculate RMS energy
+        rms_energy = np.sqrt(np.mean(audio_array**2))
+        
+        # Adaptive threshold based on sensitivity
+        base_threshold = 0.01
+        threshold = base_threshold * (2.0 - sensitivity)  # Higher sensitivity = lower threshold
+        
+        has_speech = rms_energy > threshold
+        confidence = min(rms_energy / threshold, 1.0) if threshold > 0 else 1.0
+        
+        return has_speech, {
+            "energy": float(rms_energy),
+            "confidence": float(confidence),
+            "threshold": float(threshold)
+        }
+        
+    except Exception as e:
+        logging.warning(f"VAD detection failed: {e}, assuming speech present")
+        return True, {"energy": 0.0, "confidence": 0.5, "error": str(e)}
+
+# Global variables to store current session config
+current_session_configs: Dict[str, Dict[str, str]] = {}
+
+async def concurrent_audio_processor(task: ProcessingTask) -> PipelineResult:
+    """
+    Concurrent ASR->MT->TTS processor with integrated latency monitoring.
+    
+    Enables pipeline parallelization where multiple stages run simultaneously
+    on different audio segments for sub-2s end-to-end latency.
+    """
+    latency_monitor = create_latency_monitor(target_ms=1800.0)
+    latency_monitor.start_session()
+    
+    try:
+        # Get session config for language settings
+        session_config = current_session_configs.get(task.session_id, {})
+        source_lang = session_config.get("source_lang", "auto")
+        target_lang = session_config.get("target_lang", "en")
+        
+        # Stage 1: ASR with context
+        logging.info(f"[Pipeline] 🎤 Starting ASR for session {task.session_id}")
+        with latency_monitor.track_stage("asr", {"confidence_threshold": 0.8}):
+            transcript = transcribe_chunk(
+                task.audio_data, 
+                language=source_lang if source_lang != "auto" else None
+            )
+        
+        if not transcript.strip():
+            session_data = latency_monitor.end_session()
+            stage_latencies = {stage: metrics.duration_ms for stage, metrics in session_data.items()}
+            total_latency = sum(stage_latencies.values())
+            logging.warning(f"[Pipeline] ❌ ASR failed - no speech detected")
+            return PipelineResult(
+                session_id=task.session_id,
+                chunk_ids=task.metadata.get("chunk_ids", []),
+                success=False,
+                error_message="No speech detected in audio segment",
+                total_latency_ms=total_latency,
+                stage_latencies=stage_latencies,
+                metadata={"failed_stage": "asr", "transcript": "", "translation": ""}
+            )
+        
+        logging.info(f"[Pipeline] ✅ ASR completed: '{transcript[:50]}...'")
+        
+        # Stage 2: Machine Translation
+        logging.info(f"[Pipeline] 🌐 Starting MT for session {task.session_id}")
+        with latency_monitor.track_stage("mt", {"source": source_lang, "target": target_lang}):
+            translation = await translate_text(transcript, source_lang, target_lang)
+        
+        if not translation.strip():
+            session_data = latency_monitor.end_session()
+            stage_latencies = {stage: metrics.duration_ms for stage, metrics in session_data.items()}
+            total_latency = sum(stage_latencies.values())
+            logging.warning(f"[Pipeline] ❌ MT failed - empty translation")
+            return PipelineResult(
+                session_id=task.session_id,
+                chunk_ids=task.metadata.get("chunk_ids", []),
+                success=False,
+                error_message="Translation produced empty result",
+                total_latency_ms=total_latency,
+                stage_latencies=stage_latencies,
+                metadata={"failed_stage": "mt", "transcript": transcript, "translation": ""}
+            )
+        
+        logging.info(f"[Pipeline] ✅ MT completed: '{translation[:50]}...'")
+        
+        # Stage 3: Text-to-Speech
+        logging.info(f"[Pipeline] 🔊 Starting TTS for session {task.session_id}")
+        with latency_monitor.track_stage("tts", {"text_length": len(translation)}):
+            audio_result = synthesize_text(translation)
+        
+        if not audio_result:
+            session_data = latency_monitor.end_session()
+            stage_latencies = {stage: metrics.duration_ms for stage, metrics in session_data.items()}
+            total_latency = sum(stage_latencies.values())
+            logging.warning(f"[Pipeline] ❌ TTS failed - no audio generated")
+            return PipelineResult(
+                session_id=task.session_id,
+                chunk_ids=task.metadata.get("chunk_ids", []),
+                success=False,
+                error_message="TTS synthesis failed",
+                total_latency_ms=total_latency,
+                stage_latencies=stage_latencies,
+                metadata={"failed_stage": "tts", "transcript": transcript, "translation": translation}
+            )
+        
+        logging.info(f"[Pipeline] ✅ TTS completed: {len(audio_result)} bytes")
+        
+        session_data = latency_monitor.end_session()
+        stage_latencies = {stage: metrics.duration_ms for stage, metrics in session_data.items()}
+        total_latency = sum(stage_latencies.values())
+        
+        return PipelineResult(
+            session_id=task.session_id,
+            chunk_ids=task.metadata.get("chunk_ids", []),
+            translated_audio=audio_result,
+            success=True,
+            total_latency_ms=total_latency,
+            stage_latencies=stage_latencies,
+            metadata={
+                "transcript": transcript,
+                "translation": translation,
+                "audio_size": len(audio_result)
+            }
+        )
+        
+    except Exception as e:
+        session_data = latency_monitor.end_session()
+        stage_latencies = {stage: metrics.duration_ms for stage, metrics in session_data.items()}
+        total_latency = sum(stage_latencies.values())
+        return PipelineResult(
+            session_id=task.session_id,
+            chunk_ids=task.metadata.get("chunk_ids", []),
+            success=False,
+            error_message=f"Pipeline error: {str(e)}",
+            total_latency_ms=total_latency,
+            stage_latencies=stage_latencies
+        )
+
 @router.websocket("/ws/translate")
 async def websocket_translate(ws: WebSocket):
-    """WebSocket endpoint for real-time audio translation.
-    
-    Expected client flow:
-    1. Send configuration: {"type": "config", "source_lang": "ru", "target_lang": "en"}
-    2. Send audio chunks: binary data (WAV format)
-    3. Receive translated audio: binary data (WAV format)
     """
-    await ws.accept()
+    WebSocket endpoint for concurrent real-time audio translation.
+    
+    Features:
+    - Session-based coordination with pipeline parallelization
+    - Non-blocking audio input and result streaming
+    - Sub-2s latency with comprehensive monitoring
+    - Automatic error recovery and backpressure control
+    """
+    session_id = generate_session_id()
+    coordinator: Optional[StreamingPipelineCoordinator] = None
     
     # Default configuration
     source_lang = "auto"
     target_lang = "en"
     
+    await ws.accept()
+    
     try:
-        logging.info("WebSocket translation session started")
+        logging.info(f"Starting concurrent translation session: {session_id}")
+        
+        # Initialize session coordinator with real-time config
+        config = create_realtime_config()
+        coordinator = create_pipeline_coordinator(session_id, config)
+        active_sessions[session_id] = coordinator
+        
+        # Start concurrent pipeline processing
+        await coordinator.start_pipeline(concurrent_audio_processor)
+        
+        logging.info(f"Session {session_id} coordinator started successfully")
         
         while True:
-            # Receive message generically first
             message = await ws.receive()
             
-            # Handle text messages (config)
+            # Handle text messages (configuration)
             if message["type"] == "websocket.receive" and "text" in message:
                 try:
                     config_data = json.loads(message["text"])
@@ -45,189 +238,171 @@ async def websocket_translate(ws: WebSocket):
                     if config_data.get("type") == "config":
                         source_lang = config_data.get("source_lang", "auto")
                         target_lang = config_data.get("target_lang", "en")
-                        logging.info(f"Updated translation config: {source_lang} -> {target_lang}")
                         
-                        # Send acknowledgment
+                        # Store session config for processor function
+                        current_session_configs[session_id] = {
+                            "source_lang": source_lang,
+                            "target_lang": target_lang
+                        }
+                        
+                        logging.info(f"Session {session_id}: Updated config {source_lang} -> {target_lang}")
+                        
                         await ws.send_text(json.dumps({
                             "type": "config_ack",
+                            "session_id": session_id,
                             "source_lang": source_lang,
                             "target_lang": target_lang
                         }))
+                        
                 except Exception as e:
-                    logging.error(f"Error processing config: {e}")
+                    logging.error(f"Session {session_id}: Config error: {e}")
             
-            # Handle binary messages (audio)
+            # Handle binary messages (audio) with concurrent processing
             elif message["type"] == "websocket.receive" and "bytes" in message:
                 try:
                     audio_data = message["bytes"]
                     
                     if len(audio_data) > 0:
-                        # Debug: Log audio data info
-                        logging.info(f"Received audio data: {len(audio_data)} bytes")
+                        # Convert to WAV format
+                        wav_audio = convert_audio_to_wav(audio_data, input_format="webm")
                         
-                        # Save raw audio for debugging (first few chunks only)
-                        if len(audio_data) > 1000:  # Only save substantial chunks
-                            debug_path = f"debug_audio_{int(time.time())}.webm"
-                            with open(debug_path, "wb") as f:
-                                f.write(audio_data)
-                            logging.info(f"Saved debug audio to: {debug_path}")
+                        # Enhanced voice activity detection
+                        has_speech, vad_metadata = detect_speech_activity(wav_audio)
                         
-                        # Process audio through translation pipeline
-                        translated_audio, pipeline_info = await process_audio_pipeline(
-                            audio_data, source_lang, target_lang
+                        # Add audio chunk to coordinator's buffer
+                        chunk_added = await coordinator.add_audio_chunk(
+                            wav_audio, 
+                            duration_ms=len(wav_audio) // 32,  # Approximate duration
+                            has_speech=has_speech
                         )
                         
-                        if pipeline_info["success"] and translated_audio:
-                            logging.info(f"Sending translated audio: {len(translated_audio)} bytes")
-                            # Send translated audio back to client
-                            await ws.send_bytes(translated_audio)
-                        else:
-                            # Send detailed error information to client
-                            error_msg = pipeline_info.get("error", "Unknown pipeline error")
-                            logging.warning(f"Pipeline failed: {error_msg}")
-                            
-                            await ws.send_text(json.dumps({
-                                "type": "pipeline_error",
-                                "message": error_msg,
-                                "stages": pipeline_info.get("stages", {}),
-                                "total_latency": pipeline_info.get("total_latency", 0)
-                            }))
-                            
+                        if not chunk_added:
+                            logging.warning(f"Session {session_id}: Buffer overflow, applying backpressure")
+                            await coordinator.handle_backpressure()
+                        
+                        # Check for completed processing results (non-blocking)
+                        while result := await coordinator.get_next_result():
+                            if result.success and result.translated_audio:
+                                # Send debug information about successful pipeline
+                                debug_metadata = result.metadata or {}
+                                
+                                # Send transcript preview
+                                if debug_metadata.get("transcript"):
+                                    await ws.send_text(json.dumps({
+                                        "type": "debug_transcript",
+                                        "text": debug_metadata["transcript"],
+                                        "stage_latencies": result.stage_latencies
+                                    }))
+                                
+                                # Send translation preview
+                                if debug_metadata.get("translation"):
+                                    await ws.send_text(json.dumps({
+                                        "type": "debug_translation", 
+                                        "text": debug_metadata["translation"],
+                                        "total_latency_ms": result.total_latency_ms
+                                    }))
+                                
+                                # Send success status
+                                await ws.send_text(json.dumps({
+                                    "type": "debug_pipeline_complete",
+                                    "success": True,
+                                    "audio_size": len(result.translated_audio),
+                                    "stage_latencies": result.stage_latencies,
+                                    "total_latency_ms": result.total_latency_ms
+                                }))
+                                
+                                logging.info(f"Session {session_id}: Sending translated audio: {len(result.translated_audio)} bytes")
+                                await ws.send_bytes(result.translated_audio)
+                            else:
+                                # Send detailed error information with debug context
+                                debug_metadata = result.metadata or {}
+                                failed_stage = debug_metadata.get("failed_stage", "unknown")
+                                
+                                # Send stage-specific debug info even on failure
+                                if debug_metadata.get("transcript"):
+                                    await ws.send_text(json.dumps({
+                                        "type": "debug_transcript",
+                                        "text": debug_metadata["transcript"],
+                                        "stage_latencies": result.stage_latencies
+                                    }))
+                                
+                                if debug_metadata.get("translation"):
+                                    await ws.send_text(json.dumps({
+                                        "type": "debug_translation",
+                                        "text": debug_metadata["translation"],
+                                        "stage_latencies": result.stage_latencies
+                                    }))
+                                
+                                # Send detailed error information
+                                await ws.send_text(json.dumps({
+                                    "type": "debug_pipeline_error",
+                                    "session_id": session_id,
+                                    "message": result.error_message,
+                                    "failed_stage": failed_stage,
+                                    "latency_ms": result.total_latency_ms,
+                                    "stage_latencies": result.stage_latencies,
+                                    "transcript": debug_metadata.get("transcript", ""),
+                                    "translation": debug_metadata.get("translation", "")
+                                }))
+                        
+                        # Send session health status periodically
+                        if coordinator.is_healthy():
+                            stats = coordinator.get_pipeline_stats()
+                            if stats.sessions_processed % 10 == 0:  # Every 10 processed segments
+                                await ws.send_text(json.dumps({
+                                    "type": "health_status",
+                                    "session_id": session_id,
+                                    "avg_latency_ms": stats.avg_pipeline_latency_ms,
+                                    "compliance_rate": stats.target_compliance_rate,
+                                    "processed_segments": stats.sessions_processed
+                                }))
+                        
                 except Exception as e:
-                    logging.error(f"Error processing audio: {e}")
+                    logging.error(f"Session {session_id}: Audio processing error: {e}")
                     await ws.send_text(json.dumps({
                         "type": "error",
+                        "session_id": session_id,
                         "message": str(e)
                     }))
                     
     except WebSocketDisconnect:
-        logging.info("WebSocket translation session ended")
+        logging.info(f"Session {session_id}: WebSocket disconnected")
     except Exception as e:
-        logging.error(f"WebSocket error: {e}")
+        logging.error(f"Session {session_id}: WebSocket error: {e}")
+    finally:
+        # Graceful session cleanup
+        if coordinator:
+            try:
+                await coordinator.stop_pipeline()
+                logging.info(f"Session {session_id}: Pipeline stopped successfully")
+            except Exception as e:
+                logging.error(f"Session {session_id}: Cleanup error: {e}")
         
-async def process_audio_pipeline(audio_data: bytes, source_lang: str, target_lang: str) -> tuple[bytes, dict]:
-    """Process audio through ASR -> MT -> TTS pipeline with detailed error reporting.
+        # Remove from active sessions and session configs
+        active_sessions.pop(session_id, None)
+        current_session_configs.pop(session_id, None)
+        logging.info(f"Session {session_id}: Cleanup completed")
 
-    Args:
-        audio_data: Raw audio bytes (WebM/Opus format from frontend)
-        source_lang: Source language code
-        target_lang: Target language code
-
-    Returns:
-        Tuple of (translated_audio_bytes, pipeline_info_dict)
-        If processing fails, returns (b"", error_info_dict)
-    """
-    pipeline_start = time.time()
-    pipeline_info = {
-        "success": False,
-        "stages": {},
-        "total_latency": 0,
-        "error": None
-    }
+@router.get("/health/sessions")
+async def get_active_sessions():
+    """Get health information about active translation sessions."""
+    session_info = {}
     
-    try:
-        # Step 0: Audio Format Conversion
-        stage_start = time.time()
-        logging.info("Starting audio format conversion...")
-        
-        wav_audio = convert_audio_to_wav(audio_data, input_format="webm")
-        
-        conversion_time = time.time() - stage_start
-        pipeline_info["stages"]["conversion"] = {
-            "success": True,
-            "latency": conversion_time,
-            "input_size": len(audio_data),
-            "output_size": len(wav_audio)
-        }
-        logging.info(f"Audio conversion completed in {conversion_time*1000:.1f}ms")
-
-        # Step 1: Speech-to-Text (ASR)
-        stage_start = time.time()
-        logging.info("Starting ASR (Speech-to-Text)...")
-        
-        transcript = transcribe_chunk(wav_audio, language=source_lang if source_lang != "auto" else None)
-        
-        asr_time = time.time() - stage_start
-        pipeline_info["stages"]["asr"] = {
-            "success": True,
-            "latency": asr_time,
-            "transcript": transcript,
-            "transcript_length": len(transcript.strip())
-        }
-
-        if not transcript.strip():
-            logging.info("No speech detected in audio chunk")
-            pipeline_info["stages"]["asr"]["success"] = False
-            pipeline_info["error"] = "No speech detected"
-            return b"", pipeline_info
-
-        logging.info(f"ASR completed in {asr_time*1000:.1f}ms: '{transcript[:50]}{'...' if len(transcript) > 50 else ''}'")
-
-        # Step 2: Machine Translation (MT)
-        stage_start = time.time()
-        logging.info("Starting MT (Machine Translation)...")
-        
-        translated_text = await translate_text(transcript, source_lang, target_lang)
-        
-        mt_time = time.time() - stage_start
-        pipeline_info["stages"]["mt"] = {
-            "success": True,
-            "latency": mt_time,
-            "original_text": transcript,
-            "translated_text": translated_text,
-            "translation_length": len(translated_text.strip())
-        }
-
-        if not translated_text.strip():
-            logging.warning("Translation resulted in empty text")
-            pipeline_info["stages"]["mt"]["success"] = False
-            pipeline_info["error"] = "Translation produced empty result"
-            return b"", pipeline_info
-
-        logging.info(f"MT completed in {mt_time*1000:.1f}ms: '{translated_text[:50]}{'...' if len(translated_text) > 50 else ''}'")
-
-        # Step 3: Text-to-Speech (TTS)
-        stage_start = time.time()
-        logging.info("Starting TTS (Text-to-Speech)...")
-        
-        translated_audio = synthesize_text(translated_text)
-        
-        tts_time = time.time() - stage_start
-        pipeline_info["stages"]["tts"] = {
-            "success": True,
-            "latency": tts_time,
-            "input_text": translated_text,
-            "output_size": len(translated_audio)
-        }
-
-        if not translated_audio:
-            logging.error("TTS synthesis failed - no audio output")
-            pipeline_info["stages"]["tts"]["success"] = False
-            pipeline_info["error"] = "TTS synthesis failed"
-            return b"", pipeline_info
-
-        logging.info(f"TTS completed in {tts_time*1000:.1f}ms: {len(translated_audio)} bytes")
-
-        # Pipeline Success
-        total_time = time.time() - pipeline_start
-        pipeline_info.update({
-            "success": True,
-            "total_latency": total_time
-        })
-        
-        logging.info(f"Pipeline completed successfully in {total_time*1000:.1f}ms total")
-        return translated_audio, pipeline_info
-
-    except Exception as e:
-        total_time = time.time() - pipeline_start
-        error_msg = str(e)
-        logging.error(f"Pipeline error after {total_time*1000:.1f}ms: {error_msg}")
-        
-        pipeline_info.update({
-            "success": False,
-            "total_latency": total_time,
-            "error": error_msg,
-            "error_type": type(e).__name__
-        })
-        
-        return b"", pipeline_info
+    for session_id, coordinator in active_sessions.items():
+        try:
+            stats = coordinator.get_pipeline_stats()
+            session_info[session_id] = {
+                "healthy": coordinator.is_healthy(),
+                "avg_latency_ms": stats.avg_pipeline_latency_ms,
+                "compliance_rate": stats.target_compliance_rate,
+                "processed_segments": stats.sessions_processed,
+                "buffer_stats": stats.buffer_stats,
+                "queue_stats": stats.queue_stats
+            }
+        except Exception as e:
+            session_info[session_id] = {"error": str(e)}
+    
+    return {
+        "active_sessions": len(active_sessions),
+        "sessions": session_info
+    }

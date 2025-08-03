@@ -21,6 +21,7 @@ pyttsx3
 # Audio processing
 numpy
 ffmpeg-python
+pydub
 
 # Testing dependencies
 pytest

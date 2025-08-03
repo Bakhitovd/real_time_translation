@@ -65,10 +65,13 @@ class StreamingTTS:
             
             # Clean up temporary file
             os.unlink(temp_path)
-            
-            logging.debug(f"TTS synthesized: '{text[:30]}...' ({len(audio_bytes)} bytes)")
+
+            logging.info(
+                f"[TTS] Synthesized speech: '{text[:100]}', audio_len={len(audio_bytes)} bytes, text_len={len(text)}, "
+                f"voice={self.engine.getProperty('voice')}, rate={self.engine.getProperty('rate')}, volume={self.engine.getProperty('volume')}"
+            )
             return audio_bytes
-            
+
         except Exception as e:
             logging.error(f"TTS synthesis failed: {e}")
             return b""
