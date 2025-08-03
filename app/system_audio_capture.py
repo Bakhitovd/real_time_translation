@@ -240,6 +240,36 @@ def create_system_audio_handler(sample_rate: int = 16000, chunk_duration: int = 
     return SystemAudioCaptureHandler(sample_rate, chunk_duration)
 
 
+def process_system_audio(audio_data: bytes, source_format: str = 'webm', sensitivity: float = 0.01) -> Dict:
+    """
+    Standalone function to process system audio data.
+    
+    Args:
+        audio_data: Raw audio bytes from browser
+        source_format: Source audio format
+        sensitivity: Speech detection sensitivity threshold
+        
+    Returns:
+        dict: Processed audio info with WAV data and metadata
+    """
+    handler = create_system_audio_handler()
+    result = handler.process_system_audio(audio_data, source_format)
+    
+    # Update speech detection with custom sensitivity
+    if result['success'] and result['wav_data']:
+        has_speech, energy_level = handler.detect_speech_activity(result['wav_data'], sensitivity)
+        result.update({
+            'has_speech': has_speech,
+            'energy_level': energy_level
+        })
+        
+        # Rename wav_data to wav_audio for compatibility with tests
+        result['wav_audio'] = result['wav_data']
+        result['metadata'] = result['audio_info']
+    
+    return result
+
+
 def is_system_audio_supported() -> bool:
     """
     Check if system audio capture is supported in current environment.

@@ -1,19 +1,22 @@
-"""
-Module 7: M2M-100 Translation Service
-Standalone GPU-optimized translation service with session-based context management.
-Target: <200ms latency per 30-token chunk, 1k token context window per session.
-"""
-
 import asyncio
 import logging
 import time
 from typing import Dict, Optional, Tuple, Any
 from dataclasses import dataclass, field
 from collections import defaultdict, deque
+
 import torch
 from transformers import M2M100ForConditionalGeneration, M2M100Tokenizer
 from fastapi import FastAPI, HTTPException
+from contextlib import asynccontextmanager
 from pydantic import BaseModel
+
+# Configure root logger
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -55,27 +58,33 @@ class M2MTranslationService:
         self.translation_count = 0
         self.total_latency = 0.0
         
-        logging.info(f"Initializing M2M-100 service on {self.device}")
+        logger.info(f"Initializing M2M-100 service on device: {self.device}")
+        if self.device == "cuda":
+            logger.info(f"CUDA available: {torch.cuda.get_device_name(0)}")
+        else:
+            logger.warning("CUDA not available. Using CPU. This will be significantly slower.")
     
     async def initialize(self) -> None:
         """Load and warm up M2M-100 model."""
         try:
             # Load tokenizer and model
+            logger.info(f"Loading tokenizer and model: {self.model_name}")
             self.tokenizer = M2M100Tokenizer.from_pretrained(self.model_name)
             self.model = M2M100ForConditionalGeneration.from_pretrained(self.model_name)
             
             if self.device == "cuda":
                 self.model = self.model.cuda()
-                logging.info(f"Model loaded on GPU: {torch.cuda.get_device_name()}")
+                logger.info("Model moved to GPU memory")
+                logger.info(f"GPU memory allocated at init: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
             
             self.model.eval()
             
             # Warmup with dummy translation
             await self._warmup()
-            logging.info("M2M-100 service initialized and warmed up")
+            logger.info("M2M-100 service initialized and warmed up")
             
         except Exception as e:
-            logging.error(f"Failed to initialize M2M-100 service: {e}")
+            logger.error(f"Failed to initialize M2M-100 service: {e}")
             raise
     
     async def _warmup(self) -> None:
@@ -86,6 +95,7 @@ class M2MTranslationService:
             inputs = self.tokenizer(dummy_text, return_tensors="pt")
             if self.device == "cuda":
                 inputs = {k: v.cuda() for k, v in inputs.items()}
+                logger.debug("Warmup inputs moved to GPU")
             
             with torch.no_grad():
                 _ = self.model.generate(
@@ -94,24 +104,14 @@ class M2MTranslationService:
                     max_new_tokens=20,
                     num_beams=1
                 )
-            logging.info("Model warmup completed")
+            logger.info("Model warmup completed")
         except Exception as e:
-            logging.warning(f"Warmup failed: {e}")
+            logger.warning(f"Warmup failed: {e}")
     
     async def translate(self, session_id: str, text: str, source_lang: str = "ru", 
                        target_lang: str = "en", use_context: bool = True) -> Tuple[str, Dict[str, Any]]:
         """
         Translate text with session-based context management.
-        
-        Args:
-            session_id: Session identifier for context isolation
-            text: Text to translate
-            source_lang: Source language code
-            target_lang: Target language code
-            use_context: Whether to use session context
-            
-        Returns:
-            (translated_text, metadata)
         """
         if not self.model or not self.tokenizer:
             raise HTTPException(status_code=503, detail="Service not initialized")
@@ -119,15 +119,14 @@ class M2MTranslationService:
         start_time = time.time()
         
         try:
+            # Log beginning of translation
+            logger.info(f"Starting translation for session={session_id} text_len={len(text)}")
             # Get session context
             context = self.session_contexts[session_id]
             context_text = context.get_context() if use_context else ""
             
             # Prepare input with context
-            if context_text and use_context:
-                full_input = f"{context_text} {text}"
-            else:
-                full_input = text
+            full_input = f"{context_text} {text}" if context_text and use_context else text
             
             # Set source language and tokenize
             self.tokenizer.src_lang = source_lang
@@ -135,6 +134,8 @@ class M2MTranslationService:
             
             if self.device == "cuda":
                 inputs = {k: v.cuda() for k, v in inputs.items()}
+                logger.debug("Translation inputs moved to GPU")
+                logger.debug(f"GPU memory before generate: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
             
             # Generate translation
             with torch.no_grad():
@@ -168,23 +169,26 @@ class M2MTranslationService:
                 "target_lang": target_lang
             }
             
-            logging.info(
+            # Log completion and GPU stats
+            logger.info(
                 f"Translation completed: session={session_id}, latency={latency_ms:.1f}ms, "
                 f"context_tokens={context.token_count}, input_len={len(text)}"
             )
+            if self.device == "cuda":
+                logger.info(f"GPU memory after generate: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
             
             return translation, metadata
             
         except Exception as e:
             latency_ms = (time.time() - start_time) * 1000
-            logging.error(f"Translation failed for session {session_id}: {e}, latency={latency_ms:.1f}ms")
+            logger.error(f"Translation failed for session {session_id}: {e}, latency={latency_ms:.1f}ms")
             raise HTTPException(status_code=500, detail=f"Translation failed: {str(e)}")
     
     def cleanup_session(self, session_id: str) -> bool:
         """Clean up session context."""
         if session_id in self.session_contexts:
             del self.session_contexts[session_id]
-            logging.info(f"Cleaned up context for session {session_id}")
+            logger.info(f"Cleaned up context for session {session_id}")
             return True
         return False
     
@@ -196,16 +200,16 @@ class M2MTranslationService:
             if current_time - ctx.last_access > max_age_seconds
         ]
         
-        for session_id in stale_sessions:
-            self.cleanup_session(session_id)
+        for sid in stale_sessions:
+            self.cleanup_session(sid)
         
+        logger.info(f"Cleaned up {len(stale_sessions)} stale sessions")
         return len(stale_sessions)
     
     def get_service_stats(self) -> Dict[str, Any]:
         """Get service performance statistics."""
         avg_latency = self.total_latency / self.translation_count if self.translation_count > 0 else 0.0
-        
-        return {
+        stats = {
             "translations_completed": self.translation_count,
             "average_latency_ms": avg_latency,
             "active_sessions": len(self.session_contexts),
@@ -214,7 +218,8 @@ class M2MTranslationService:
             "model_loaded": self.model is not None,
             "target_compliance": (avg_latency < 200.0) if self.translation_count > 0 else True
         }
-
+        logger.debug(f"Service stats: {stats}")
+        return stats
 
 # Pydantic models for API
 class TranslationRequest(BaseModel):
@@ -233,14 +238,15 @@ class TranslationResponse(BaseModel):
 # Global service instance
 service = M2MTranslationService()
 
-# FastAPI app
-app = FastAPI(title="M2M-100 Translation Service")
-
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize service on startup."""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
     await service.initialize()
+    yield
+    # Shutdown - cleanup if needed
+
+# FastAPI app with lifespan events
+app = FastAPI(title="M2M-100 Translation Service", lifespan=lifespan)
 
 
 @app.post("/translate", response_model=TranslationResponse)
@@ -275,7 +281,6 @@ async def cleanup_stale_sessions(max_age_seconds: int = 3600):
     cleaned_count = service.cleanup_stale_sessions(max_age_seconds)
     return {"cleaned_sessions": cleaned_count}
 
-
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8001, log_level="info")
+    uvicorn.run("m2m_service:app", host="0.0.0.0", port=8001, log_level="info")
