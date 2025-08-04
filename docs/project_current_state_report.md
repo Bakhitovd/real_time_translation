@@ -26,28 +26,97 @@ The project has undergone a complete architectural transformation:
 **Phase 2 - Walk (Completed)**: Real-time streaming with intelligent buffering  
 **Phase 3 - Run (Current)**: Concurrent pipeline parallelization with session management  
 
-### 1.2 Current Architecture
+### 1.2 Current Architecture with M2M-100 Integration
 
+```mermaid
+graph TB
+    subgraph "Frontend Layer"
+        Browser[Browser Client<br/>System Audio Capture]
+        WebSocket[WebSocket Connection<br/>Session Management]
+    end
+    
+    subgraph "Main Application (Port 8000)"
+        WSHandler[WebSocket Handler<br/>app/ws.py]
+        Coordinator[StreamingPipelineCoordinator<br/>Module 4]
+        
+        subgraph "Core Modules"
+            Buffer[StreamingAudioBuffer<br/>Module 1]
+            Queue[AsyncProcessingQueue<br/>Module 2] 
+            Monitor[LatencyMonitor<br/>Module 3]
+        end
+    end
+    
+    subgraph "Pipeline Stages"
+        ASR[ASR Engine<br/>faster-whisper<br/>Local Model]
+        MT[Machine Translation<br/>M2M Service Client<br/>app/mt.py]
+        TTS[Text-to-Speech<br/>pyttsx3<br/>Local Engine]
+    end
+    
+    subgraph "M2M Translation Service (Port 8001)"
+        M2MService[M2M-100 FastAPI Service<br/>app/m2m_service.py]
+        
+        subgraph "M2M Components"
+            SessionMgr[Session Context Manager<br/>1k Token Windows]
+            M2MModel[Meta M2M-100 418M<br/>GPU/CPU Optimized]
+            HealthAPI[Health Monitoring<br/>/health endpoint]
+        end
+    end
+    
+    subgraph "Configuration & Storage"
+        Config[config.yaml<br/>Translation Settings]
+        TempFiles[Temporary File Manager<br/>Cross-platform]
+    end
+    
+    %% Data Flow
+    Browser --> WebSocket
+    WebSocket --> WSHandler
+    WSHandler --> Coordinator
+    Coordinator --> Buffer
+    Coordinator --> Queue
+    Coordinator --> Monitor
+    
+    %% Pipeline Flow
+    Queue --> ASR
+    ASR --> MT
+    MT --> TTS
+    TTS --> WSHandler
+    WSHandler --> WebSocket
+    WebSocket --> Browser
+    
+    %% M2M Service Integration
+    MT -.->|HTTP POST /translate<br/>Session ID + Context| M2MService
+    M2MService --> SessionMgr
+    SessionMgr --> M2MModel
+    M2MModel -.->|Translation Result<br/>+ Metadata| MT
+    
+    %% Health Monitoring
+    MT -.->|Health Check| HealthAPI
+    HealthAPI -.->|Service Stats| MT
+    
+    %% Configuration
+    Config --> WSHandler
+    Config --> MT
+    TempFiles --> ASR
+    TempFiles --> TTS
+    
+    %% Styling
+    classDef frontend fill:#e1f5fe
+    classDef pipeline fill:#f3e5f5
+    classDef m2m fill:#e8f5e8
+    classDef config fill:#fff3e0
+    
+    class Browser,WebSocket frontend
+    class ASR,MT,TTS pipeline
+    class M2MService,SessionMgr,M2MModel,HealthAPI m2m
+    class Config,TempFiles config
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Frontend (Browser)                           │
-│                WebSocket + System Audio Capture                │
-├─────────────────────────────────────────────────────────────────┤
-│                    WebSocket Handler                            │
-│                 (Session Management)                            │
-├─────────────────────────────────────────────────────────────────┤
-│               StreamingPipelineCoordinator                     │
-│                    (Module Integration)                         │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐ │
-│  │ StreamingAudio  │  │ AsyncProcessing │  │ LatencyMonitor  │ │
-│  │ Buffer          │  │ Queue           │  │                 │ │
-│  │ (Module 1)      │  │ (Module 2)      │  │ (Module 3)      │ │
-│  └─────────────────┘  └─────────────────┘  └─────────────────┘ │
-├─────────────────────────────────────────────────────────────────┤
-│  Concurrent Pipeline: ASR(N) || MT(N-1) || TTS(N-2)           │
-│  Real-time: <1800ms latency + Performance monitoring           │
-└─────────────────────────────────────────────────────────────────┘
-```
+
+**Architecture Highlights:**
+- **Concurrent Pipeline**: ASR(N) || MT(N-1) || TTS(N-2) processing with session isolation
+- **M2M-100 Integration**: Self-hosted translation service with context-aware processing  
+- **Session Management**: Per-session context buffers maintaining conversation coherence
+- **Real-time Performance**: <1800ms end-to-end latency with comprehensive monitoring
+- **Fault Tolerance**: Circuit breaker patterns and graceful degradation throughout
 
 ---
 
@@ -201,15 +270,18 @@ The project has undergone a complete architectural transformation:
 
 ### 3.2 Machine Translation (`app/mt.py`)
 
-**Status**: ✅ Production Ready  
-**Provider**: OpenAI API with robust networking  
-**Performance**: Circuit breaker pattern with retry logic  
+**Status**: ✅ Production Ready with M2M-100 Integration  
+**Provider**: M2M-100 Self-Hosted Service with robust networking  
+**Performance**: <200ms latency target with context-aware translation  
 
 **Key Features**:
-- Enhanced network resilience with connection pooling
-- Exponential backoff retry mechanisms
-- Circuit breaker for fault tolerance
-- Comprehensive timeout configuration
+- **M2M-100 Service Integration**: Self-hosted Meta M2M-100 418M model
+- **Context-Aware Translation**: Session-based context management for coherence
+- **Enhanced Network Resilience**: HTTP client with connection pooling and retries
+- **Circuit Breaker Pattern**: Fault tolerance with automatic recovery
+- **Session Management**: Per-session translation context with 1k token windows
+- **GPU Acceleration**: Automatic GPU/CPU fallback for deployment flexibility
+- **Health Monitoring**: Real-time service health checks and performance tracking
 
 ### 3.3 Text-to-Speech (`app/tts.py`)
 

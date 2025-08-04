@@ -119,10 +119,10 @@ async def concurrent_audio_processor(task: ProcessingTask) -> PipelineResult:
         
         logging.info(f"[Pipeline] ✅ ASR completed: '{transcript[:50]}...'")
         
-        # Stage 2: Machine Translation
-        logging.info(f"[Pipeline] 🌐 Starting MT for session {task.session_id}")
+        # Stage 2: Machine Translation with session context
+        logging.info(f"[Pipeline] 🌐 Starting M2M MT for session {task.session_id}")
         with latency_monitor.track_stage("mt", {"source": source_lang, "target": target_lang}):
-            translation = await translate_text(transcript, source_lang, target_lang)
+            translation = await translate_text(transcript, source_lang, target_lang, session_id=task.session_id)
         
         if not translation.strip():
             session_data = latency_monitor.end_session()

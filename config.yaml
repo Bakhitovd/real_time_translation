@@ -11,6 +11,24 @@ model:
     en: tts_models/en/vctk/vits
     ru: tts_models/ru/oksana/vits
 
+# Translation service configuration
+translation:
+  # Provider selection: "openai" or "m2m"
+  provider: "openai"
+  
+  # M2M-100 service configuration
+  m2m_service:
+    url: "http://localhost:8001"
+    timeout_seconds: 5.0
+    max_retries: 3
+    health_check_interval: 30.0
+    
+  # OpenAI API configuration (existing)
+  openai:
+    model: "gpt-4.1-mini"
+    max_retries: 3
+    timeout_seconds: 30.0
+
 coqui:
   # Enable GPU acceleration for TTS
   use_cuda: true
