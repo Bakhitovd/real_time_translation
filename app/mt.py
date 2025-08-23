@@ -43,37 +43,48 @@ class StreamingMT:
             )
         )
         
-        # Circuit breaker state
+        # Circuit breaker state (configurable)
         self.failure_count = 0
         self.last_failure_time = 0
-        self.circuit_open_duration = 60  # 60 seconds
-        
-        logging.info(f"Initialized M2M-100 MT service at '{self.service_url}' with {self.timeout_seconds}s timeout")
+        # configurable thresholds from config (with sensible defaults)
+        self.circuit_failure_threshold = m2m_config.get("failure_threshold", 3)
+        self.circuit_open_duration = m2m_config.get("circuit_open_duration", 60)  # seconds
+        self.backoff_base = m2m_config.get("backoff_base", 0.5)
+        self.max_backoff = m2m_config.get("max_backoff", 10.0)
+
+        logging.info(
+            f"Initialized M2M-100 MT service at '{self.service_url}' with {self.timeout_seconds}s timeout, "
+            f"circuit_failure_threshold={self.circuit_failure_threshold}, circuit_open_duration={self.circuit_open_duration}s"
+        )
     
     def _is_circuit_open(self) -> bool:
-        """Check if circuit breaker is open."""
-        if self.failure_count >= 3:  # Open circuit after 3 failures
-            time_since_failure = time.time() - self.last_failure_time
-            if time_since_failure < self.circuit_open_duration:
-                return True
-            else:
-                # Reset circuit breaker after timeout
-                self.failure_count = 0
-                self.last_failure_time = 0
-                logging.info("[MT] Circuit breaker reset - attempting to reconnect")
+        """Check if circuit breaker is open using configurable thresholds."""
+        try:
+            if self.failure_count >= self.circuit_failure_threshold:
+                time_since_failure = time.time() - self.last_failure_time
+                if time_since_failure < self.circuit_open_duration:
+                    return True
+                else:
+                    # Reset circuit breaker after timeout
+                    logging.info("[MT] Circuit breaker timeout expired; resetting counters and attempting reconnection")
+                    self.failure_count = 0
+                    self.last_failure_time = 0
+        except Exception:
+            # In case configuration is invalid, keep circuit closed to avoid permanent disabling
+            return False
         return False
 
     async def _translate_with_retries(self, session_id: str, text: str, source_lang: str, target_lang: str, max_retries: int = None) -> Optional[str]:
-        """Execute M2M translation with exponential backoff retries."""
+        """Execute M2M translation with exponential backoff + jitter retries and improved error classification."""
+        import random
+
         if max_retries is None:
             max_retries = self.max_retries
-            
-        retry_delays = [0.5, 1.0, 2.0]  # Exponential backoff delays
-        
+
         for attempt in range(max_retries):
             try:
                 logging.debug(f"[MT] M2M translation attempt {attempt + 1}/{max_retries}")
-                
+
                 # Prepare request payload for M2M service
                 payload = {
                     "session_id": session_id,
@@ -82,51 +93,77 @@ class StreamingMT:
                     "target_lang": target_lang,
                     "use_context": True  # Enable context-aware translation
                 }
-                
+
                 response = await self.http_client.post(
                     f"{self.service_url}/translate",
                     json=payload,
                     timeout=self.timeout_seconds
                 )
+
+                # Raise for HTTP errors (will be caught below)
                 response.raise_for_status()
-                
-                result = response.json()
+
+                # Parse JSON safely
+                try:
+                    result = response.json()
+                except Exception:
+                    result = {}
                 translation = result.get("translation", "")
-                
-                # Success - reset failure counter
+
+                # Success - reset failure counter and return
                 self.failure_count = 0
+                self.last_failure_time = 0
                 return translation
-                
-            except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.ConnectError) as e:
-                logging.warning(f"[MT] M2M service network error on attempt {attempt + 1}: {type(e).__name__}: {e}")
-                
-                if attempt < max_retries - 1:  # Don't delay on final attempt
-                    delay = retry_delays[min(attempt, len(retry_delays) - 1)]
-                    logging.info(f"[MT] Retrying M2M service in {delay}s...")
+
+            except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.ConnectError, httpx.RemoteProtocolError) as e:
+                logging.warning(f"[MT] Network error on attempt {attempt + 1}: {type(e).__name__}: {e}")
+
+                # On transient network errors, use exponential backoff with jitter
+                if attempt < max_retries - 1:
+                    backoff = min(self.backoff_base * (2 ** attempt), self.max_backoff)
+                    jitter = random.uniform(0, backoff * 0.1)
+                    delay = backoff + jitter
+                    logging.info(f"[MT] Retrying in {delay:.2f}s (attempt {attempt + 2}/{max_retries})")
                     await asyncio.sleep(delay)
+                    continue
                 else:
-                    # Final attempt failed - update circuit breaker
+                    # Final failure -> increment failure counter for circuit breaker
                     self.failure_count += 1
                     self.last_failure_time = time.time()
-                    logging.error(f"[MT] All {max_retries} M2M service attempts failed. Circuit breaker failure count: {self.failure_count}")
-                    
+                    logging.error(f"[MT] All {max_retries} network attempts failed. failure_count={self.failure_count}")
+
             except httpx.HTTPStatusError as e:
-                logging.error(f"[MT] M2M service HTTP error on attempt {attempt + 1}: {e.response.status_code} - {e.response.text}")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(retry_delays[min(attempt, len(retry_delays) - 1)])
+                status = getattr(e.response, "status_code", None)
+                body = getattr(e.response, "text", "")
+                logging.error(f"[MT] HTTP error on attempt {attempt + 1}: {status} - {body}")
+
+                # For 5xx server errors treat as transient; for 4xx treat as permanent
+                if status and 500 <= int(status) < 600 and attempt < max_retries - 1:
+                    backoff = min(self.backoff_base * (2 ** attempt), self.max_backoff)
+                    jitter = random.uniform(0, backoff * 0.1)
+                    delay = backoff + jitter
+                    logging.info(f"[MT] Server error, retrying in {delay:.2f}s")
+                    await asyncio.sleep(delay)
+                    continue
                 else:
+                    # Permanent failure, update circuit breaker
                     self.failure_count += 1
                     self.last_failure_time = time.time()
-                    logging.error(f"[MT] M2M service failed after {max_retries} attempts")
-                    
+                    logging.error(f"[MT] Permanent HTTP failure, incrementing failure_count to {self.failure_count}")
+
             except Exception as e:
-                # Non-network errors don't trigger circuit breaker
-                logging.error(f"[MT] M2M service error on attempt {attempt + 1}: {type(e).__name__}: {e}")
+                logging.error(f"[MT] Unexpected error on attempt {attempt + 1}: {type(e).__name__}: {e}")
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(retry_delays[min(attempt, len(retry_delays) - 1)])
+                    backoff = min(self.backoff_base * (2 ** attempt), self.max_backoff)
+                    jitter = random.uniform(0, backoff * 0.1)
+                    delay = backoff + jitter
+                    logging.info(f"[MT] Retrying after unexpected error in {delay:.2f}s")
+                    await asyncio.sleep(delay)
+                    continue
                 else:
-                    logging.error(f"[MT] M2M translation failed after {max_retries} attempts")
-        
+                    logging.error(f"[MT] Final unexpected failure after {max_retries} attempts")
+                    # Do not increment failure_count for unexpected parsing errors (avoid false opens)
+
         return None
 
     async def translate_text(self, text: str, source_lang: str, target_lang: str, session_id: str = "default") -> str:

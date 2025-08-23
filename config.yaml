@@ -22,6 +22,11 @@ translation:
     timeout_seconds: 5.0
     max_retries: 3
     health_check_interval: 30.0
+    # Tuning and resilience parameters (used by app/mt.py)
+    failure_threshold: 3               # failures to open circuit
+    circuit_open_duration: 60.0        # seconds circuit remains open before retrying
+    backoff_base: 0.5                  # base backoff in seconds for retries
+    max_backoff: 10.0                  # maximum backoff in seconds
     
   # OpenAI API configuration (existing)
   openai:

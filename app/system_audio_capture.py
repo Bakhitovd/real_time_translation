@@ -72,49 +72,114 @@ class SystemAudioCaptureHandler:
     def convert_to_wav(self, audio_data: bytes, source_format: str = 'webm') -> bytes:
         """
         Convert audio data to WAV format.
-        
+
+        Tries a sequence of strategies to maximize the chance of successful decoding:
+         1. Use provided source_format hint (common for live capture flows).
+         2. Detect likely container from header heuristics (ftyp/mp4, WebM, Ogg, MP3, WAV) and try that.
+         3. Fall back to letting ffmpeg autodetect format by calling from_file without a format.
+
         Args:
             audio_data: Input audio bytes
             source_format: Source format hint ('webm', 'mp3', 'ogg', etc.)
-            
+
         Returns:
             bytes: WAV format audio data
-            
+
         Raises:
             ValueError: If conversion fails
         """
+        def _export_to_wav(segment: AudioSegment) -> bytes:
+            segment = segment.set_frame_rate(self.target_sample_rate)
+            segment = segment.set_channels(1)
+            segment = segment.set_sample_width(2)
+            buf = io.BytesIO()
+            segment.export(buf, format="wav")
+            return buf.getvalue()
+
+        # Strategy 1: try the provided hint first
+        tried_formats = []
+        try_variants = []
+
+        if source_format:
+            try_variants.append(source_format)
+
+        # Strategy 2: header-based heuristics
         try:
-            # Create audio segment from bytes
-            audio_segment = AudioSegment.from_file(
-                io.BytesIO(audio_data), 
-                format=source_format
-            )
-            
-            # Convert to target specifications
-            audio_segment = audio_segment.set_frame_rate(self.target_sample_rate)
-            audio_segment = audio_segment.set_channels(1)  # Mono
-            audio_segment = audio_segment.set_sample_width(2)  # 16-bit
-            
-            # Export to WAV bytes
-            wav_buffer = io.BytesIO()
-            audio_segment.export(wav_buffer, format='wav')
-            return wav_buffer.getvalue()
-            
-        except Exception as e:
-            logger.error(f"Audio conversion failed: {e}")
-            raise ValueError(f"Failed to convert audio: {e}")
+            header = audio_data[:16] if len(audio_data) >= 16 else audio_data
+            if audio_data.startswith(b'RIFF'):
+                try_variants.append("wav")
+            if audio_data.startswith(b'OggS'):
+                try_variants.append("ogg")
+            if audio_data.startswith(b'ID3'):
+                try_variants.append("mp3")
+            if audio_data.startswith(b'\x1a\x45\xdf\xa3'):
+                try_variants.append("webm")
+            if len(audio_data) >= 8 and audio_data[4:8] == b'ftyp':
+                # MP4 / M4A container
+                try_variants.append("mp4")
+                try_variants.append("m4a")
+        except Exception:
+            # Ignore header parsing errors; we'll fall back to autodetect
+            pass
+
+        # Remove duplicates but preserve order
+        seen = set()
+        try_variants = [f for f in try_variants if not (f in seen or seen.add(f))]
+
+        # Try each candidate format
+        for fmt in try_variants:
+            tried_formats.append(fmt)
+            try:
+                seg = AudioSegment.from_file(io.BytesIO(audio_data), format=fmt)
+                return _export_to_wav(seg)
+            except Exception:
+                continue
+
+        # Final strategy: attempt file-backed autodetection (more robust on Windows/ffmpeg builds)
+        import tempfile
+        tried_paths = []
+        fallback_extensions = ["m4a", "mp4", "webm", "ogg", "mp3"]
+        try:
+            for ext in fallback_extensions:
+                try:
+                    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}")
+                    tmp.write(audio_data)
+                    tmp.flush()
+                    tmp.close()
+                    tried_paths.append(tmp.name)
+                    seg = AudioSegment.from_file(tmp.name)
+                    # Clean up temp files after successful read
+                    for p in tried_paths:
+                        try:
+                            import os
+                            os.remove(p)
+                        except Exception:
+                            pass
+                    return _export_to_wav(seg)
+                except Exception:
+                    # try next extension
+                    continue
+        except Exception:
+            pass
+
+        # Last resort: in-memory autodetect (may fail on some ffmpeg builds)
+        try:
+            seg = AudioSegment.from_file(io.BytesIO(audio_data))
+            return _export_to_wav(seg)
+        except Exception as e_final:
+            logger.error(f"Audio conversion failed for tried formats {tried_formats} and paths {tried_paths}: {e_final}")
+            raise ValueError(f"Failed to convert audio: {e_final}")
     
     def extract_audio_info(self, wav_data: bytes) -> Dict[str, Union[int, float]]:
         """
-        Extract audio metadata from WAV data.
+        Extract audio metadata from WAV or other audio bytes.
         
-        Args:
-            wav_data: WAV format audio bytes
-            
-        Returns:
-            dict: Audio metadata (sample_rate, channels, duration_ms, etc.)
+        This function first tries to parse the input as a WAV stream (fast, no external
+        dependencies). If that fails (e.g. for M4A/MP4, WebM, MP3), it uses pydub/ffmpeg
+        to probe and extract metadata. Returns an empty dict on failure.
         """
         try:
+            # Fast path for WAV data
             wav_buffer = io.BytesIO(wav_data)
             with wave.open(wav_buffer, 'rb') as wav_file:
                 frames = wav_file.getnframes()
@@ -122,28 +187,67 @@ class SystemAudioCaptureHandler:
                 channels = wav_file.getnchannels()
                 sample_width = wav_file.getsampwidth()
                 
-                duration_ms = (frames / sample_rate) * 1000
+                duration_seconds = frames / float(sample_rate) if sample_rate else 0.0
                 
                 return {
+                    'format': 'wav',
                     'sample_rate': sample_rate,
                     'channels': channels,
                     'sample_width': sample_width,
                     'frames': frames,
+                    'duration_seconds': duration_seconds,
+                    'duration_ms': duration_seconds * 1000.0,
+                    'size_bytes': len(wav_data)
+                }
+        except Exception as e_wav:
+            # Fallback: try to use pydub/ffmpeg to read other formats (m4a/mp4, webm, mp3, ogg)
+            try:
+                audio_segment = AudioSegment.from_file(io.BytesIO(wav_data))
+                # pydub uses milliseconds for length
+                duration_ms = len(audio_segment)
+                sample_rate = getattr(audio_segment, "frame_rate", None)
+                channels = getattr(audio_segment, "channels", None)
+                sample_width = getattr(audio_segment, "sample_width", None)
+                
+                # Try to detect format via header heuristics
+                header = wav_data[:12] if len(wav_data) >= 12 else wav_data
+                detected_format = None
+                if wav_data.startswith(b'RIFF'):
+                    detected_format = 'wav'
+                elif wav_data.startswith(b'OggS'):
+                    detected_format = 'ogg'
+                elif wav_data.startswith(b'ID3'):
+                    detected_format = 'mp3'
+                elif wav_data.startswith(b'\x1a\x45\xdf\xa3'):
+                    detected_format = 'webm'
+                elif len(wav_data) >= 8 and wav_data[4:8] == b'ftyp':
+                    detected_format = 'mp4/m4a'
+                else:
+                    detected_format = 'unknown'
+                
+                return {
+                    'format': detected_format,
+                    'sample_rate': sample_rate,
+                    'channels': channels,
+                    'sample_width': sample_width,
+                    'frames': int((duration_ms / 1000.0) * sample_rate) if sample_rate else None,
+                    'duration_seconds': duration_ms / 1000.0,
                     'duration_ms': duration_ms,
                     'size_bytes': len(wav_data)
                 }
-        except Exception as e:
-            logger.error(f"Failed to extract audio info: {e}")
-            return {}
+            except Exception as e_pydub:
+                logger.error(f"Failed to extract audio info: {e_wav} | {e_pydub}")
+                return {}
     
-    def detect_speech_activity(self, wav_data: bytes, threshold: float = 0.01) -> Tuple[bool, float]:
+    def detect_speech_activity(self, wav_data: bytes, sensitivity: float = 0.01) -> Tuple[bool, float]:
         """
-        Detect speech activity in audio data.
-        
+        Detect speech activity in audio data using a sensitivity parameter where higher values
+        increase sensitivity (i.e. lower the energy threshold).
+
         Args:
             wav_data: WAV format audio bytes
-            threshold: Energy threshold for speech detection
-            
+            sensitivity: Sensitivity in range [0.0, 1.0]. Higher -> more sensitive detection.
+
         Returns:
             tuple: (has_speech, energy_level)
         """
@@ -153,16 +257,30 @@ class SystemAudioCaptureHandler:
             with wave.open(wav_buffer, 'rb') as wav_file:
                 frames = wav_file.readframes(-1)
                 audio_array = np.frombuffer(frames, dtype=np.int16)
-            
+
             # Calculate RMS energy
             if len(audio_array) > 0:
                 rms_energy = np.sqrt(np.mean(audio_array.astype(np.float32) ** 2))
                 normalized_energy = rms_energy / 32768.0  # Normalize for 16-bit
+
+                # Map sensitivity -> threshold: higher sensitivity => lower threshold
+                try:
+                    s = float(sensitivity)
+                except Exception:
+                    s = 0.01
+                # Clamp sensitivity to [0.0, 1.0]
+                s = max(0.0, min(1.0, s))
+                base_threshold = 0.01
+                threshold = base_threshold * max(0.0, (1.0 - s))
+
+                # Debug logging for thresholds and energy (helps diagnose failing integration)
+                logger.debug(f"[VAD] sensitivity={s}, threshold={threshold:.6f}, energy={normalized_energy:.6f}")
+
                 has_speech = normalized_energy > threshold
                 return has_speech, float(normalized_energy)
-            
+
             return False, 0.0
-            
+
         except Exception as e:
             logger.error(f"Speech activity detection failed: {e}")
             return False, 0.0

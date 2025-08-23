@@ -6,12 +6,14 @@ Wraps local Whisper model for streaming audio transcription.
 import io
 import logging
 import tempfile
+import time
 import numpy as np
 from faster_whisper import WhisperModel
 from typing import Optional
 import soundfile as sf
 import os
 from .temp_file_manager import managed_temp_file, write_bytes_to_temp_file, safe_file_delete
+from app.utils import validate_wav_format
 
 class StreamingASR:
     """Streaming ASR using faster-whisper for real-time transcription."""
@@ -30,43 +32,70 @@ class StreamingASR:
     
     def transcribe_chunk(self, audio_bytes: bytes, language: Optional[str] = None) -> str:
         """Transcribe an audio chunk and return transcript.
-        
+
         Args:
             audio_bytes: Raw audio bytes (WAV format expected)
             language: Source language code (None for auto-detect)
-            
+
         Returns:
             Transcribed text string
         """
         try:
-            # Use managed temporary file with guaranteed cleanup
-            with managed_temp_file(suffix=".wav", prefix="asr_") as temp_path:
-                # Write audio bytes to temporary file
-                with open(temp_path, 'wb') as f:
-                    f.write(audio_bytes)
-                
-                # Transcribe using faster-whisper
-                segments, info = self.model.transcribe(
-                    temp_path, 
-                    language=language, 
-                    task="transcribe",
-                    vad_filter=True,  # Voice activity detection
-                    vad_parameters=dict(min_silence_duration_ms=500)
-                )
-                
-                # Combine all segments into transcript
-                transcript = " ".join([segment.text.strip() for segment in segments])
+            # Basic validation: ensure we have a plausible WAV
+            if not audio_bytes or len(audio_bytes) < 100:
+                logging.warning("[ASR] Audio chunk too small to transcribe")
+                return ""
 
-                # Log transcript and metadata at INFO level
-                lang = getattr(info, "language", None)
-                lang_prob = getattr(info, "language_probability", None)
-                duration = getattr(info, "duration", None)
-                logging.info(
-                    f"[ASR] Transcribed chunk: '{transcript[:100]}', "
-                    f"lang={lang}, lang_prob={lang_prob}, duration={duration}s, audio_len={len(audio_bytes)} bytes"
-                )
+            # Validate WAV header where possible to avoid passing invalid data to Whisper
+            try:
+                is_wav = validate_wav_format(audio_bytes)
+            except Exception:
+                is_wav = False
 
-                return transcript.strip()
+            if not is_wav:
+                logging.warning("[ASR] Input audio does not appear to be valid WAV; proceeding but result may be empty")
+
+            max_attempts = 2
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    # Use managed temporary file with guaranteed cleanup
+                    with managed_temp_file(suffix=".wav", prefix="asr_") as temp_path:
+                        # Write audio bytes to temporary file
+                        with open(temp_path, 'wb') as f:
+                            f.write(audio_bytes)
+
+                        # Transcribe using faster-whisper (may raise)
+                        segments, info = self.model.transcribe(
+                            temp_path,
+                            language=language,
+                            task="transcribe",
+                            vad_filter=True,
+                            vad_parameters=dict(min_silence_duration_ms=500)
+                        )
+
+                        # Combine all segments into transcript
+                        transcript = " ".join([segment.text.strip() for segment in segments if getattr(segment, "text", None)])
+
+                        # Log transcript and metadata at INFO level
+                        lang = getattr(info, "language", None)
+                        lang_prob = getattr(info, "language_probability", None)
+                        duration = getattr(info, "duration", None)
+                        logging.info(
+                            f"[ASR] Transcribed chunk (attempt {attempt}): '{transcript[:100]}', "
+                            f"lang={lang}, lang_prob={lang_prob}, duration={duration}s, audio_len={len(audio_bytes)} bytes"
+                        )
+
+                        return transcript.strip()
+
+                except Exception as inner_e:
+                    logging.warning(f"[ASR] Transcription attempt {attempt} failed: {inner_e}")
+                    # small backoff before retrying
+                    if attempt < max_attempts:
+                        time.sleep(0.2 * attempt)
+                        continue
+                    else:
+                        logging.error(f"[ASR] All {max_attempts} transcription attempts failed for this chunk")
+                        return ""
 
         except Exception as e:
             logging.error(f"ASR transcription failed: {e}")

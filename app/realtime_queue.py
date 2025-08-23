@@ -44,13 +44,24 @@ class ProcessingTask:
 
 @dataclass
 class ProcessingResult:
-    """Result from processing a task."""
+    """Result from processing a task.
+
+    Extended fields added so pipeline callers (coordinator and ws) can include
+    session-scoped information and readily send audio back over websockets.
+    Backwards-compatible defaults are provided.
+    """
     task_id: str
     success: bool
     result_data: Optional[bytes] = None
     error_message: Optional[str] = None
     processing_time_ms: float = 0.0
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    # Added fields (defaults preserve compatibility)
+    session_id: str = ""
+    translated_audio: Optional[bytes] = None
+    stage_latencies: Dict[str, float] = field(default_factory=dict)
+    total_latency_ms: float = 0.0
 
 
 @dataclass

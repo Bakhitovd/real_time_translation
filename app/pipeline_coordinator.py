@@ -12,8 +12,8 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, Callable, Awaitable, List
 from enum import Enum
 
-from app.streaming_buffer import StreamingAudioBuffer, AudioChunk, create_default_buffer
-from app.realtime_queue import AsyncProcessingQueue, ProcessingTask, TaskPriority, create_optimized_queue
+from app.streaming_buffer import StreamingAudioBuffer, AudioChunk, create_default_buffer, BufferConfig
+from app.realtime_queue import AsyncProcessingQueue, ProcessingTask, TaskPriority, QueueConfig
 from app.latency_monitor import LatencyMonitor, create_latency_monitor
 
 
@@ -80,8 +80,28 @@ class StreamingPipelineCoordinator:
         self.config = config or PipelineConfig()
         
         # Initialize components
-        self.buffer = create_default_buffer()
-        self.queue = create_optimized_queue()
+        # Create buffer using pipeline config values when possible
+        try:
+            buffer_cfg = BufferConfig(
+                max_chunk_size_ms=self.config.chunk_size_ms,
+                overlap_ms=self.config.overlap_ms,
+                max_silence_gap_ms=max(self.config.overlap_ms * 2, 400),
+                max_buffer_duration_ms=self.config.max_buffer_duration_ms
+            )
+            self.buffer = StreamingAudioBuffer(buffer_cfg)
+        except Exception:
+            # Fall back to default buffer if BufferConfig creation fails
+            self.buffer = create_default_buffer()
+
+        # Create processing queue using pipeline config
+        queue_cfg = QueueConfig(
+            max_queue_size=self.config.queue_size,
+            worker_count=self.config.worker_count,
+            task_timeout_sec=10.0,
+            enable_priority_queue=True
+        )
+        self.queue = AsyncProcessingQueue(queue_cfg)
+
         self.monitor = create_latency_monitor(
             target_ms=self.config.target_latency_ms,
             history_size=1000
@@ -160,6 +180,17 @@ class StreamingPipelineCoordinator:
         
         # Enqueue for processing (non-blocking with backpressure control)
         enqueued = await self.queue.enqueue_task(task)
+        if not enqueued:
+            logging.warning(f"Session {self.session_id}: Queue full when enqueuing task {task.task_id}, handling backpressure")
+            # Attempt backpressure mitigation: free buffer space and retry once
+            await self.handle_backpressure()
+            try:
+                # Small yield to allow workers to pick tasks
+                await asyncio.sleep(0.05)
+                enqueued = await self.queue.enqueue_task(task)
+            except Exception:
+                enqueued = False
+
         if enqueued:
             self._session_counter += 1
             # Mark chunks as processed in buffer
@@ -277,11 +308,22 @@ class StreamingPipelineCoordinator:
         return True
     
     async def handle_backpressure(self) -> None:
-        """Handle backpressure by clearing oldest buffer data."""
+        """Handle backpressure by freeing buffer space and allowing queue workers to catch up."""
         if self.queue.is_queue_full():
-            # Clear buffer to reduce memory pressure
-            self.buffer.clear()
-            logging.warning(f"Backpressure detected for session {self.session_id}, cleared buffer")
+            # Try to remove oldest half of buffered audio first to preserve recent overlap
+            try:
+                target = max(self.buffer.total_duration_ms // 2, 0)
+                removed = 0
+                while self.buffer.total_duration_ms > target and len(self.buffer.chunks) > 1:
+                    oldest = self.buffer.chunks.popleft()
+                    self.buffer.total_duration_ms -= oldest.duration_ms
+                    removed += 1
+                logging.warning(f"Backpressure detected for session {self.session_id}, removed {removed} oldest chunks")
+            except Exception as e:
+                logging.warning(f"Backpressure mitigation failed to trim buffer: {e}, clearing buffer instead")
+                self.buffer.clear()
+            # Briefly yield to let workers process queued tasks
+            await asyncio.sleep(0.05)
 
 
 def create_pipeline_coordinator(session_id: str, config: Optional[PipelineConfig] = None) -> StreamingPipelineCoordinator:
